@@ -252,6 +252,7 @@ const GAME_SENTENCES = {
 async function loadGame(gameId) {
   const res = await fetch(`data/${gameId}.json`);
   game = await res.json();
+  eventIdx = 0;
   document.getElementById('start-title').textContent = game.title;
   document.getElementById('start-meta').textContent =
     `${game.awayTeam} vs ${game.homeTeam}  ·  ${game.date}`;
@@ -265,6 +266,7 @@ let speed      = 1;
 let lastTs     = null;
 let audioCtx   = null;
 let endShown   = false;
+let eventIdx   = 0; // pointer into game.events for audio punctuation
 
 function gameDuration() { return game ? game.duration : 2880; }
 
@@ -460,6 +462,7 @@ function checkMoments() {
         document.getElementById('moment-label').textContent = clockString(km.t);
         document.getElementById('moment-text').textContent  = humanLabel(km);
         overlay.style.opacity = 1;
+        fireMomentAudio(km);
       }
       return;
     }
@@ -517,26 +520,39 @@ function buildTimeline() {
 }
 
 // ─── Audio ────────────────────────────────────────────────────────────────────
+// Shared nodes (set by initAudio)
+let _master, _conv, _drones, _heartbeat, _heartGain, _duck;
+let _lastDroneModT = 0; // throttle lead-change modulation
+
 function initAudio() {
   audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-  const master = audioCtx.createGain();
-  master.gain.value = 0;
-  master.connect(audioCtx.destination);
-  master.gain.linearRampToValueAtTime(0.3, audioCtx.currentTime + 2);
 
-  const conv     = audioCtx.createConvolver();
+  // Master gain → destination
+  _master = audioCtx.createGain();
+  _master.gain.value = 0;
+  _master.connect(audioCtx.destination);
+  _master.gain.linearRampToValueAtTime(0.3, audioCtx.currentTime + 2);
+
+  // Duck gain (for timeouts) — sits between drones and master
+  _duck = audioCtx.createGain();
+  _duck.gain.value = 1;
+  _duck.connect(_master);
+
+  // Reverb convolver
+  _conv = audioCtx.createConvolver();
   const convGain = audioCtx.createGain();
-  convGain.gain.value = 0.4;
-  conv.connect(convGain); convGain.connect(master);
+  convGain.gain.value = 0.35;
+  _conv.connect(convGain); convGain.connect(_master);
   const rate = audioCtx.sampleRate;
   const buf  = audioCtx.createBuffer(2, rate * 2.5, rate);
   for (let ch = 0; ch < 2; ch++) {
     const d = buf.getChannelData(ch);
     for (let i = 0; i < d.length; i++) d[i] = (Math.random()*2-1) * Math.pow(1-i/d.length, 3);
   }
-  conv.buffer = buf;
+  _conv.buffer = buf;
 
-  window._drones = [55, 82.4, 110, 164.8].map((f, i) => {
+  // 4 drone oscillators (sine/triangle, bass→mid)
+  _drones = [55, 82.4, 110, 164.8].map((f, i) => {
     const osc  = audioCtx.createOscillator();
     const gain = audioCtx.createGain();
     const filt = audioCtx.createBiquadFilter();
@@ -545,24 +561,158 @@ function initAudio() {
     filt.type = 'lowpass'; filt.frequency.value = 500;
     gain.gain.value = 0.05 - i * 0.01;
     osc.connect(filt); filt.connect(gain);
-    gain.connect(master); gain.connect(conv);
+    gain.connect(_duck); gain.connect(_conv);
     osc.start();
     return { osc, gain, filt };
   });
-  window._audioMaster = master;
+
+  // Heartbeat oscillator — silent until final 2 min
+  const hOsc  = audioCtx.createOscillator();
+  _heartGain  = audioCtx.createGain();
+  const hFilt = audioCtx.createBiquadFilter();
+  hOsc.type = 'sine';
+  hOsc.frequency.value = 50;
+  hFilt.type = 'lowpass'; hFilt.frequency.value = 80;
+  _heartGain.gain.value = 0;
+  hOsc.connect(hFilt); hFilt.connect(_heartGain); _heartGain.connect(_master);
+  hOsc.start();
+  _heartbeat = { osc: hOsc, filt: hFilt };
+}
+
+// Fire a one-shot pluck (karplus-strong approximation via filtered noise burst)
+function firePluck(freq, vol) {
+  if (!audioCtx) return;
+  const now  = audioCtx.currentTime;
+  const buf  = audioCtx.createBuffer(1, audioCtx.sampleRate * 0.05, audioCtx.sampleRate);
+  const data = buf.getChannelData(0);
+  for (let i = 0; i < data.length; i++) data[i] = Math.random() * 2 - 1;
+
+  const src  = audioCtx.createBufferSource();
+  const filt = audioCtx.createBiquadFilter();
+  const gain = audioCtx.createGain();
+  src.buffer = buf;
+  filt.type  = 'bandpass'; filt.frequency.value = freq; filt.Q.value = 12;
+  gain.gain.setValueAtTime(vol, now);
+  gain.gain.exponentialRampToValueAtTime(0.001, now + 1.2);
+  src.connect(filt); filt.connect(gain); gain.connect(_master); gain.connect(_conv);
+  src.start(now);
+}
+
+// Fire a short sharp transient (turnover / block)
+function fireTransient(vol) {
+  if (!audioCtx) return;
+  const now  = audioCtx.currentTime;
+  const osc  = audioCtx.createOscillator();
+  const gain = audioCtx.createGain();
+  osc.type   = 'sawtooth'; osc.frequency.value = 180;
+  gain.gain.setValueAtTime(vol, now);
+  gain.gain.exponentialRampToValueAtTime(0.001, now + 0.08);
+  osc.connect(gain); gain.connect(_master);
+  osc.start(now); osc.stop(now + 0.1);
+}
+
+// Fire a rising swell (big run)
+function fireSwell(vol) {
+  if (!audioCtx) return;
+  const now = audioCtx.currentTime;
+  [110, 165, 220].forEach((f, i) => {
+    const osc  = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+    osc.type   = 'sine'; osc.frequency.value = f;
+    gain.gain.setValueAtTime(0, now + i * 0.12);
+    gain.gain.linearRampToValueAtTime(vol * (1 - i * 0.25), now + i * 0.12 + 0.3);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + i * 0.12 + 1.5);
+    osc.connect(gain); gain.connect(_master); gain.connect(_conv);
+    osc.start(now + i * 0.12); osc.stop(now + i * 0.12 + 1.8);
+  });
+}
+
+// Modulate drone pitches for a lead-change feel (brief dissonance then resolve)
+function fireLeadChangeMod() {
+  if (!audioCtx || !_drones) return;
+  const now = audioCtx.currentTime;
+  _drones.forEach((d, i) => {
+    const shift = i % 2 === 0 ? -25 : 20;
+    d.osc.detune.cancelScheduledValues(now);
+    d.osc.detune.setValueAtTime(shift, now);
+    d.osc.detune.linearRampToValueAtTime(0, now + 2.5);
+  });
+}
+
+// Per-event audio punctuation — called once per event as playhead crosses it
+function fireEventAudio(evt) {
+  if (!audioCtx || !playing) return;
+  const energy = sampleAt(game.energyCurve, playheadSec);
+
+  if (evt.type === 'score') {
+    // Home team = higher pitch (440Hz range), away = lower (220Hz range)
+    const freq = evt.team === 'home' ? 440 + evt.scoreDelta * 40 : 220 + evt.scoreDelta * 20;
+    firePluck(freq, 0.06 + energy * 0.08);
+  } else if (evt.type === 'free_throw') {
+    const freq = evt.team === 'home' ? 392 : 196;
+    firePluck(freq, 0.04);
+  } else if (evt.type === 'turnover') {
+    fireTransient(0.05 + energy * 0.06);
+  } else if (evt.type === 'timeout') {
+    // Duck audio for ~3 real seconds
+    if (!audioCtx || !_duck) return;
+    const now = audioCtx.currentTime;
+    _duck.gain.cancelScheduledValues(now);
+    _duck.gain.setValueAtTime(_duck.gain.value, now);
+    _duck.gain.linearRampToValueAtTime(0.1, now + 0.3);
+    _duck.gain.linearRampToValueAtTime(1.0, now + 3.5);
+  }
+}
+
+// Called by checkMoments when a key moment is newly entered
+function fireMomentAudio(km) {
+  if (!audioCtx || !playing) return;
+  if (km.type === 'lead_change') {
+    const now = audioCtx.currentTime;
+    if (now - _lastDroneModT > 4) { // don't fire too often
+      _lastDroneModT = now;
+      fireLeadChangeMod();
+    }
+  } else if (km.type === 'run_start') {
+    fireSwell(0.08 + km.intensity * 0.1);
+  }
 }
 
 function updateAudio() {
   if (!audioCtx || !game) return;
   const now      = audioCtx.currentTime;
-  const energy   = sampleAt(game.energyCurve,   playheadSec);
-  const momentum = sampleAt(game.momentumCurve,  playheadSec);
-  window._audioMaster.gain.linearRampToValueAtTime(playing ? 0.15 + energy * 0.35 : 0, now + 0.5);
-  window._drones.forEach((d, i) => {
-    d.filt.frequency.linearRampToValueAtTime(200 + energy * 900 + i * 80, now + 1);
-    const detune = Math.abs(momentum) > 0.5 ? (i % 2 === 0 ? -14 : 11) : 0;
-    d.osc.detune.linearRampToValueAtTime(detune, now + 2);
+  const energy   = sampleAt(game.energyCurve,  playheadSec);
+  const momentum = sampleAt(game.momentumCurve, playheadSec);
+
+  // Master volume
+  _master.gain.linearRampToValueAtTime(playing ? 0.15 + energy * 0.35 : 0, now + 0.5);
+
+  // Filter cutoff follows energy; detune follows momentum tightness
+  const tight = 1 - Math.abs(momentum); // peaks when 50-50
+  _drones.forEach((d, i) => {
+    d.filt.frequency.linearRampToValueAtTime(150 + energy * 1100 + i * 80, now + 1);
+    // Dissonance when tight game; resolve when one team dominates
+    const detune = tight > 0.6 ? (i % 2 === 0 ? -12 : 10) : 0;
+    d.osc.detune.linearRampToValueAtTime(detune, now + 3);
   });
+
+  // Heartbeat: activate in final 2 min (game-sec > duration - 240)
+  const timeLeft = gameDuration() - playheadSec;
+  if (timeLeft < 240 && playing) {
+    // BPM 60 → 90 as time runs out
+    const bpm      = 60 + (1 - timeLeft / 240) * 30;
+    const interval = 60 / bpm;
+    const beatPhase = (audioCtx.currentTime % interval) / interval;
+    // Pulse the heartbeat gain once per beat
+    const vol = 0.08 + energy * 0.12;
+    if (beatPhase < 0.05) {
+      _heartGain.gain.cancelScheduledValues(now);
+      _heartGain.gain.setValueAtTime(vol, now);
+      _heartGain.gain.exponentialRampToValueAtTime(0.001, now + interval * 0.7);
+    }
+  } else {
+    _heartGain.gain.linearRampToValueAtTime(0, now + 0.5);
+  }
 }
 
 // ─── Main loop ────────────────────────────────────────────────────────────────
@@ -577,6 +727,13 @@ function tick(ts) {
       playheadSec = gameDuration();
       showEndCard();
     }
+    // Fire audio for each event the playhead crossed this frame
+    if (game) {
+      while (eventIdx < game.events.length && game.events[eventIdx].t <= playheadSec) {
+        fireEventAudio(game.events[eventIdx]);
+        eventIdx++;
+      }
+    }
   }
 
   renderFrame(dt);
@@ -587,6 +744,11 @@ function tick(ts) {
 function seek(sec) {
   playheadSec   = Math.max(0, Math.min(gameDuration(), sec));
   lastMomentIdx = -1;
+  // Reset event pointer to correct position after seek
+  eventIdx = 0;
+  if (game) {
+    while (eventIdx < game.events.length && game.events[eventIdx].t <= sec) eventIdx++;
+  }
 }
 
 // ─── Timeline drag ────────────────────────────────────────────────────────────
