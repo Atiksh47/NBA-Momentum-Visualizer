@@ -6,619 +6,194 @@
 <title>NBA Momentum Visualizer</title>
 <style>
 * { margin: 0; padding: 0; box-sizing: border-box; }
-body { background: #000; overflow: hidden; font-family: 'Georgia', serif; color: #fff; }
-canvas { display: block; }
 
-/* ── Overlays ── */
-#moment-overlay {
-  position: fixed;
-  top: 50%;
-  left: 50%;
-  transform: translate(-50%, -50%);
-  text-align: center;
-  pointer-events: none;
-  opacity: 0;
-  transition: opacity 0.6s ease;
-  z-index: 20;
-}
-#moment-label { font-size: clamp(11px, 1.8vw, 14px); letter-spacing: 0.35em; text-transform: uppercase; color: rgba(255,255,255,0.45); margin-bottom: 10px; }
-#moment-text  { font-size: clamp(24px, 5vw, 56px); font-weight: 300; letter-spacing: -0.02em; line-height: 1.1; }
-
-#score-display {
-  position: fixed;
-  top: 24px;
-  left: 50%;
-  transform: translateX(-50%);
-  text-align: center;
-  pointer-events: none;
-  z-index: 20;
-  opacity: 0;
-  transition: opacity 1s ease;
-}
-#score-line { font-size: clamp(18px, 3vw, 28px); font-weight: 300; letter-spacing: 0.05em; }
-#clock-line { font-size: clamp(10px, 1.5vw, 13px); letter-spacing: 0.3em; text-transform: uppercase; color: rgba(255,255,255,0.4); margin-top: 4px; }
-
-/* ── Controls ── */
-#controls {
-  position: fixed;
-  bottom: 0;
-  left: 0;
-  width: 100%;
-  padding: 0 24px 20px;
-  z-index: 30;
-  opacity: 0;
-  transition: opacity 1s ease;
-  background: linear-gradient(transparent, rgba(0,0,0,0.7) 100%);
-  padding-top: 40px;
-}
-
-#timeline {
-  position: relative;
-  width: 100%;
-  height: 28px;
-  cursor: pointer;
-  margin-bottom: 12px;
-}
-#timeline-track {
-  position: absolute;
-  top: 50%;
-  left: 0;
-  width: 100%;
-  height: 2px;
-  background: rgba(255,255,255,0.15);
-  transform: translateY(-50%);
-  border-radius: 1px;
-}
-#timeline-fill {
-  height: 100%;
-  width: 0%;
-  background: rgba(255,255,255,0.5);
-  border-radius: 1px;
-  transition: background 1s ease;
-}
-#timeline-thumb {
-  position: absolute;
-  top: 50%;
-  left: 0%;
-  width: 10px;
-  height: 10px;
-  background: #fff;
-  border-radius: 50%;
-  transform: translate(-50%, -50%);
-  transition: transform 0.1s ease;
-}
-#timeline:hover #timeline-thumb { transform: translate(-50%, -50%) scale(1.4); }
-
-/* moment ticks on timeline */
-.moment-tick {
-  position: absolute;
-  top: 50%;
-  width: 2px;
-  height: 8px;
-  transform: translate(-50%, -50%);
-  border-radius: 1px;
-  opacity: 0.6;
-  cursor: pointer;
-}
-.moment-tick:hover::after {
-  content: attr(data-label);
-  position: absolute;
-  bottom: 14px;
-  left: 50%;
-  transform: translateX(-50%);
-  font-size: 10px;
-  white-space: nowrap;
-  background: rgba(0,0,0,0.8);
-  padding: 2px 6px;
-  border-radius: 3px;
-  letter-spacing: 0.05em;
+body {
+  background: #060606;
   color: #fff;
   font-family: 'Georgia', serif;
-}
-
-#control-row {
-  display: flex;
-  align-items: center;
-  gap: 16px;
-}
-
-#play-btn {
-  background: none;
-  border: 1px solid rgba(255,255,255,0.3);
-  color: #fff;
-  width: 32px;
-  height: 32px;
-  border-radius: 50%;
-  cursor: pointer;
-  font-size: 12px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  flex-shrink: 0;
-  transition: border-color 0.2s;
-}
-#play-btn:hover { border-color: rgba(255,255,255,0.7); }
-
-#time-readout {
-  font-size: 12px;
-  letter-spacing: 0.1em;
-  color: rgba(255,255,255,0.4);
-  min-width: 80px;
-  font-family: monospace;
-}
-
-#speed-btns { display: flex; gap: 6px; margin-left: auto; }
-.speed-btn {
-  background: none;
-  border: 1px solid rgba(255,255,255,0.15);
-  color: rgba(255,255,255,0.4);
-  font-size: 11px;
-  padding: 3px 8px;
-  border-radius: 3px;
-  cursor: pointer;
-  letter-spacing: 0.05em;
-  transition: color 0.2s, border-color 0.2s;
-  font-family: 'Georgia', serif;
-}
-.speed-btn:hover, .speed-btn.active {
-  color: #fff;
-  border-color: rgba(255,255,255,0.5);
-}
-
-/* ── Start screen ── */
-#start-screen {
-  position: fixed;
-  inset: 0;
-  background: #000;
+  min-height: 100vh;
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  z-index: 100;
-  cursor: pointer;
-  transition: opacity 1.2s ease;
+  padding: 48px 24px;
 }
-#start-screen h1 { font-size: clamp(28px, 5vw, 64px); font-weight: 300; letter-spacing: -0.02em; }
-#start-screen .meta { font-size: clamp(11px, 1.6vw, 14px); letter-spacing: 0.35em; text-transform: uppercase; color: rgba(255,255,255,0.3); margin-top: 10px; }
-#start-screen .prompt { font-size: 12px; letter-spacing: 0.3em; text-transform: uppercase; color: rgba(255,255,255,0.2); margin-top: 48px; animation: blink 2s ease-in-out infinite; }
-@keyframes blink { 0%,100%{opacity:.3} 50%{opacity:1} }
+
+header {
+  text-align: center;
+  margin-bottom: 64px;
+}
+header h1 {
+  font-size: clamp(20px, 4vw, 40px);
+  font-weight: 300;
+  letter-spacing: -0.02em;
+  margin-bottom: 10px;
+}
+header p {
+  font-size: clamp(11px, 1.6vw, 14px);
+  letter-spacing: 0.3em;
+  text-transform: uppercase;
+  color: rgba(255,255,255,0.28);
+}
+
+.games {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 100%;
+  max-width: 680px;
+}
+
+.game-card {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  padding: 22px 24px;
+  text-decoration: none;
+  color: #fff;
+  border: 1px solid rgba(255,255,255,0.07);
+  border-radius: 4px;
+  background: rgba(255,255,255,0.02);
+  transition: background 0.2s ease, border-color 0.2s ease;
+  cursor: pointer;
+}
+.game-card:hover {
+  background: rgba(255,255,255,0.05);
+  border-color: rgba(255,255,255,0.18);
+}
+
+.team-colors {
+  display: flex;
+  gap: 3px;
+  flex-shrink: 0;
+}
+.swatch {
+  width: 10px;
+  height: 36px;
+  border-radius: 2px;
+}
+
+.game-info { flex: 1; min-width: 0; }
+.game-title {
+  font-size: clamp(15px, 2.2vw, 19px);
+  font-weight: 300;
+  letter-spacing: -0.01em;
+  margin-bottom: 5px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.game-subtitle {
+  font-size: clamp(11px, 1.5vw, 13px);
+  color: rgba(255,255,255,0.38);
+  letter-spacing: 0.02em;
+}
+
+.game-date {
+  font-size: 11px;
+  letter-spacing: 0.15em;
+  color: rgba(255,255,255,0.2);
+  text-transform: uppercase;
+  flex-shrink: 0;
+  text-align: right;
+}
+
+.arrow {
+  color: rgba(255,255,255,0.2);
+  font-size: 14px;
+  flex-shrink: 0;
+  transition: color 0.2s, transform 0.2s;
+}
+.game-card:hover .arrow { color: rgba(255,255,255,0.6); transform: translateX(3px); }
+
+footer {
+  margin-top: 56px;
+  font-size: 11px;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  color: rgba(255,255,255,0.12);
+  text-align: center;
+}
 </style>
 </head>
 <body>
 
-<div id="start-screen">
-  <h1 id="start-title">Loading…</h1>
-  <div class="meta" id="start-meta"></div>
-  <div class="prompt">click to begin</div>
-</div>
+<header>
+  <h1>NBA Momentum Visualizer</h1>
+  <p>What did the game feel like?</p>
+</header>
 
-<canvas id="c"></canvas>
+<div class="games" id="games"></div>
 
-<div id="score-display">
-  <div id="score-line"></div>
-  <div id="clock-line"></div>
-</div>
-
-<div id="moment-overlay">
-  <div id="moment-label"></div>
-  <div id="moment-text"></div>
-</div>
-
-<div id="controls">
-  <div id="timeline">
-    <div id="timeline-track"><div id="timeline-fill"></div></div>
-    <div id="timeline-thumb"></div>
-  </div>
-  <div id="control-row">
-    <button id="play-btn">▶</button>
-    <span id="time-readout">Q1 0:00</span>
-    <div id="speed-btns">
-      <button class="speed-btn" data-speed="0.5">½×</button>
-      <button class="speed-btn active" data-speed="1">1×</button>
-      <button class="speed-btn" data-speed="2">2×</button>
-      <button class="speed-btn" data-speed="4">4×</button>
-    </div>
-  </div>
-</div>
+<footer>Data from NBA Stats API &nbsp;·&nbsp; Minimalist Mode</footer>
 
 <script>
-// ─── Canvas ───────────────────────────────────────────────────────────────────
-const canvas = document.getElementById('c');
-const ctx = canvas.getContext('2d');
-let W, H;
-function resize() { W = canvas.width = window.innerWidth; H = canvas.height = window.innerHeight; }
-resize();
-window.addEventListener('resize', resize);
+const GAMES = [
+  {
+    id:       '0041500407',
+    title:    '2016 Finals Game 7',
+    subtitle: 'The Comeback. The Block. The Shot.',
+    date:     'Jun 19, 2016',
+    home:     { team: 'GSW', color: '#1D428A', color2: '#FFC72C' },
+    away:     { team: 'CLE', color: '#860038', color2: '#FDBB30' },
+  },
+  {
+    id:       '0021501228',
+    title:    "Kobe's Last Game",
+    subtitle: '60 points. Curtain call.',
+    date:     'Apr 13, 2016',
+    home:     { team: 'LAL', color: '#552583', color2: '#FDB927' },
+    away:     { team: 'UTA', color: '#00471B', color2: '#F9A01B' },
+  },
+  {
+    id:       '0021501226',
+    title:    'Warriors Win 73',
+    subtitle: 'The regular season record that defined an era.',
+    date:     'Apr 13, 2016',
+    home:     { team: 'GSW', color: '#1D428A', color2: '#FFC72C' },
+    away:     { team: 'MEM', color: '#5D76A9', color2: '#12173F' },
+  },
+  {
+    id:       '0021500568',
+    title:    'Christmas 2015 — Warriors vs Cavs',
+    subtitle: 'The rematch. Curry vs LeBron.',
+    date:     'Dec 25, 2015',
+    home:     { team: 'GSW', color: '#1D428A', color2: '#FFC72C' },
+    away:     { team: 'CLE', color: '#860038', color2: '#FDBB30' },
+  },
+  {
+    id:       '0042100306',
+    title:    '2022 Finals Game 6 — Curry 43',
+    subtitle: 'Curry claims his Finals MVP.',
+    date:     'Jun 16, 2022',
+    home:     { team: 'BOS', color: '#007A33', color2: '#BA9653' },
+    away:     { team: 'GSW', color: '#1D428A', color2: '#FFC72C' },
+  },
+];
 
-// ─── Game data ────────────────────────────────────────────────────────────────
-let game = null;
+const container = document.getElementById('games');
 
-async function loadGame(gameId) {
-  const res = await fetch(`data/${gameId}.json`);
-  game = await res.json();
+GAMES.forEach(g => {
+  const card = document.createElement('a');
+  card.className = 'game-card';
+  card.href      = `visualizer.html?game=${g.id}`;
 
-  document.getElementById('start-title').textContent = game.title;
-  document.getElementById('start-meta').textContent =
-    `${game.awayTeam} vs ${game.homeTeam}  ·  ${game.date}`;
+  card.innerHTML = `
+    <div class="team-colors">
+      <div class="swatch" style="background:${g.home.color}"></div>
+      <div class="swatch" style="background:${g.home.color2}"></div>
+      <div class="swatch" style="background:${g.away.color2}"></div>
+      <div class="swatch" style="background:${g.away.color}"></div>
+    </div>
+    <div class="game-info">
+      <div class="game-title">${g.title}</div>
+      <div class="game-subtitle">${g.subtitle}</div>
+    </div>
+    <div class="game-date">${g.date}</div>
+    <div class="arrow">→</div>
+  `;
 
-  buildTimeline();
-}
-
-// ─── Playback state ───────────────────────────────────────────────────────────
-let playing = false;
-let playheadSec = 0;      // current position in game-seconds
-let speed = 1;
-let lastRaf = null;
-let lastTs = null;
-let audioCtx = null;
-
-function gameDuration() { return game ? game.duration : 2880; }
-
-function sampleAt(curve, sec) {
-  const idx = Math.min(Math.round(sec / game.sampleRate), curve.length - 1);
-  return curve[Math.max(0, idx)];
-}
-
-function clockString(sec) {
-  const period = Math.min(Math.floor(sec / 720) + 1, 4);
-  const inPeriod = sec % 720;
-  const m = Math.floor(inPeriod / 60);
-  const s = Math.floor(inPeriod % 60);
-  return `Q${period}  ${m}:${s.toString().padStart(2,'0')}`;
-}
-
-// ─── Particle pool ────────────────────────────────────────────────────────────
-const POOL_SIZE = 1000;
-const pool = [];
-
-class Particle {
-  constructor() { this.reset(); }
-  reset() {
-    this.x  = Math.random() * (typeof W !== 'undefined' ? W : 1920);
-    this.y  = Math.random() * (typeof H !== 'undefined' ? H : 1080);
-    this.vx = (Math.random() - 0.5) * 1.5;
-    this.vy = (Math.random() - 0.5) * 1.5;
-    this.life   = Math.random();   // phase offset so they don't all pulse together
-    this.radius = 0.8 + Math.random() * 2.2;
-    this.trail  = [];
-    this.special = Math.random() < 0.04;
-  }
-}
-for (let i = 0; i < POOL_SIZE; i++) pool.push(new Particle());
-
-// ─── Color helpers ────────────────────────────────────────────────────────────
-function hexToRgb(hex) {
-  const n = parseInt(hex.slice(1), 16);
-  return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
-}
-
-function lerpColor(a, b, t) {
-  return [
-    Math.round(a[0] + (b[0] - a[0]) * t),
-    Math.round(a[1] + (b[1] - a[1]) * t),
-    Math.round(a[2] + (b[2] - a[2]) * t),
-  ];
-}
-
-function rgbStr(rgb, alpha) {
-  return `rgba(${rgb[0]},${rgb[1]},${rgb[2]},${alpha.toFixed(3)})`;
-}
-
-// ─── Render frame ─────────────────────────────────────────────────────────────
-function renderFrame(dt) {
-  if (!game) return;
-
-  const momentum = sampleAt(game.momentumCurve, playheadSec); // -1 home, +1 away
-  const energy   = sampleAt(game.energyCurve,   playheadSec); // 0–1
-
-  const homeRgb  = hexToRgb(game.homeColor);
-  const awayRgb  = hexToRgb(game.awayColor);
-  const homeRgb2 = hexToRgb(game.homeColorSecondary);
-  const awayRgb2 = hexToRgb(game.awayColorSecondary);
-
-  // momentum 0→1 (0 = full home, 1 = full away)
-  const t = (momentum + 1) / 2;
-  const dominantPrimary   = lerpColor(homeRgb,  awayRgb,  t);
-  const dominantSecondary = lerpColor(homeRgb2, awayRgb2, t);
-
-  // ── Background ──
-  ctx.fillStyle = `rgba(0,0,0,${0.18 - energy * 0.05})`;
-  ctx.fillRect(0, 0, W, H);
-
-  // nebula glow
-  if (energy > 0.15) {
-    const r = Math.min(W, H) * 0.55;
-    const grd = ctx.createRadialGradient(W/2, H/2, 0, W/2, H/2, r);
-    grd.addColorStop(0, rgbStr(dominantPrimary, energy * 0.07));
-    grd.addColorStop(1, 'rgba(0,0,0,0)');
-    ctx.fillStyle = grd;
-    ctx.fillRect(0, 0, W, H);
-  }
-
-  // ── Particles ──
-  const activeCount = Math.round(150 + energy * 850);
-  const maxSpeed    = 1.5 + energy * 4;
-  // momentum biases drift: positive = rightward (away team), negative = leftward (home team)
-  const driftX = momentum * 0.6;
-  const driftY = 0;
-
-  for (let i = 0; i < POOL_SIZE; i++) {
-    const p = pool[i];
-    const active = i < activeCount;
-
-    if (!active) { p.trail = []; continue; }
-
-    // physics
-    p.trail.push({ x: p.x, y: p.y });
-    const trailLen = Math.round(2 + energy * 6);
-    if (p.trail.length > trailLen) p.trail.shift();
-
-    p.vx += driftX * 0.04 + (Math.random() - 0.5) * 0.25 * energy;
-    p.vy += driftY * 0.04 + (Math.random() - 0.5) * 0.25 * energy;
-
-    // gentle center pull to keep field cohesive
-    p.vx += (W / 2 - p.x) * 0.0003;
-    p.vy += (H / 2 - p.y) * 0.0003;
-
-    const spd = Math.hypot(p.vx, p.vy);
-    if (spd > maxSpeed) { p.vx = p.vx / spd * maxSpeed; p.vy = p.vy / spd * maxSpeed; }
-
-    p.x += p.vx * dt / 16.67;
-    p.y += p.vy * dt / 16.67;
-    p.life += 0.005 * dt / 16.67;
-
-    // wrap
-    if (p.x < -20) p.x = W + 20;
-    if (p.x > W+20) p.x = -20;
-    if (p.y < -20) p.y = H + 20;
-    if (p.y > H+20) p.y = -20;
-
-    const alpha = (0.25 + energy * 0.55) * (0.6 + 0.4 * Math.sin(p.life * Math.PI * 2));
-
-    // trail
-    if (p.trail.length > 1) {
-      ctx.beginPath();
-      ctx.moveTo(p.trail[0].x, p.trail[0].y);
-      for (let j = 1; j < p.trail.length; j++) ctx.lineTo(p.trail[j].x, p.trail[j].y);
-      ctx.strokeStyle = rgbStr(dominantSecondary, alpha * 0.3);
-      ctx.lineWidth = p.radius * 0.6;
-      ctx.stroke();
-    }
-
-    // glow for special particles
-    if (p.special && energy > 0.4) {
-      const gr = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, p.radius * 9);
-      gr.addColorStop(0, rgbStr(dominantPrimary, alpha * 0.4));
-      gr.addColorStop(1, 'rgba(0,0,0,0)');
-      ctx.beginPath();
-      ctx.arc(p.x, p.y, p.radius * 9, 0, Math.PI * 2);
-      ctx.fillStyle = gr;
-      ctx.fill();
-    }
-
-    // core
-    ctx.beginPath();
-    ctx.arc(p.x, p.y, p.radius * (1 + energy * 0.4), 0, Math.PI * 2);
-    ctx.fillStyle = rgbStr(dominantPrimary, alpha);
-    ctx.fill();
-  }
-}
-
-// ─── Score + clock UI ─────────────────────────────────────────────────────────
-function findScore(sec) {
-  // Walk events backwards to find last scored event at or before sec
-  const evts = game.events;
-  let h = 0, a = 0;
-  for (let i = 0; i < evts.length; i++) {
-    if (evts[i].t > sec) break;
-    if (evts[i].homeScore > 0 || evts[i].awayScore > 0) {
-      h = evts[i].homeScore;
-      a = evts[i].awayScore;
-    }
-  }
-  return { h, a };
-}
-
-function updateScoreUI() {
-  const { h, a } = findScore(playheadSec);
-  document.getElementById('score-line').textContent =
-    `${game.homeTeam}  ${h} — ${a}  ${game.awayTeam}`;
-  document.getElementById('clock-line').textContent = clockString(playheadSec);
-
-  // timeline
-  const pct = playheadSec / gameDuration() * 100;
-  document.getElementById('timeline-fill').style.width = pct + '%';
-  document.getElementById('timeline-thumb').style.left  = pct + '%';
-
-  const mins = Math.floor(playheadSec / 60);
-  const secs = Math.floor(playheadSec % 60);
-  document.getElementById('time-readout').textContent = clockString(playheadSec);
-}
-
-// ─── Key moment overlays ──────────────────────────────────────────────────────
-let lastMomentIdx = -1;
-const overlay = document.getElementById('moment-overlay');
-
-function checkMoments() {
-  if (!game.keyMoments.length) return;
-  // Find which moment window we're in (show for 4 real seconds each)
-  for (let i = 0; i < game.keyMoments.length; i++) {
-    const km = game.keyMoments[i];
-    const gameSec = km.t;
-    // Show overlay for 4 real seconds after hitting this moment
-    const realElapsed = (playheadSec - gameSec) / speed;
-    if (realElapsed >= 0 && realElapsed < 4 / speed) {
-      if (lastMomentIdx !== i) {
-        lastMomentIdx = i;
-        document.getElementById('moment-label').textContent = clockString(km.t);
-        document.getElementById('moment-text').textContent = km.label;
-        overlay.style.opacity = 1;
-      }
-      return;
-    }
-  }
-  if (lastMomentIdx !== -1) {
-    overlay.style.opacity = 0;
-    lastMomentIdx = -1;
-  }
-}
-
-// ─── Timeline: build moment ticks ────────────────────────────────────────────
-function buildTimeline() {
-  const track = document.getElementById('timeline-track');
-  // remove old ticks
-  track.querySelectorAll('.moment-tick').forEach(el => el.remove());
-
-  const typeColor = {
-    lead_change: '#aaa',
-    run_start:   '#e8a020',
-    clutch_shot: '#e05050',
-    timeout:     '#555',
-  };
-
-  game.keyMoments.forEach(km => {
-    const pct = km.t / game.duration * 100;
-    const tick = document.createElement('div');
-    tick.className = 'moment-tick';
-    tick.style.left = pct + '%';
-    tick.style.background = typeColor[km.type] || '#888';
-    tick.setAttribute('data-label', km.label);
-    tick.addEventListener('click', e => {
-      e.stopPropagation();
-      seek(km.t);
-    });
-    track.appendChild(tick);
-  });
-}
-
-// ─── Audio: minimal generative drone ─────────────────────────────────────────
-function initAudio() {
-  audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-  const master = audioCtx.createGain();
-  master.gain.value = 0;
-  master.connect(audioCtx.destination);
-  master.gain.linearRampToValueAtTime(0.3, audioCtx.currentTime + 2);
-
-  // reverb
-  const conv = audioCtx.createConvolver();
-  const convGain = audioCtx.createGain();
-  convGain.gain.value = 0.4;
-  conv.connect(convGain);
-  convGain.connect(master);
-  const rate = audioCtx.sampleRate;
-  const buf = audioCtx.createBuffer(2, rate * 2.5, rate);
-  for (let ch = 0; ch < 2; ch++) {
-    const d = buf.getChannelData(ch);
-    for (let i = 0; i < d.length; i++) d[i] = (Math.random()*2-1) * Math.pow(1-i/d.length, 3);
-  }
-  conv.buffer = buf;
-
-  const freqs = [55, 82.4, 110, 164.8];
-  window._drones = freqs.map((f, i) => {
-    const osc  = audioCtx.createOscillator();
-    const gain = audioCtx.createGain();
-    const filt = audioCtx.createBiquadFilter();
-    osc.type = i % 2 === 0 ? 'sine' : 'triangle';
-    osc.frequency.value = f;
-    filt.type = 'lowpass';
-    filt.frequency.value = 500;
-    gain.gain.value = 0.05 - i * 0.01;
-    osc.connect(filt); filt.connect(gain);
-    gain.connect(master); gain.connect(conv);
-    osc.start();
-    return { osc, gain, filt };
-  });
-
-  window._audioMaster = master;
-}
-
-function updateAudio() {
-  if (!audioCtx || !game) return;
-  const now = audioCtx.currentTime;
-  const energy   = sampleAt(game.energyCurve,   playheadSec);
-  const momentum = sampleAt(game.momentumCurve,  playheadSec);
-
-  window._audioMaster.gain.linearRampToValueAtTime(
-    playing ? 0.15 + energy * 0.35 : 0, now + 0.5
-  );
-
-  window._drones.forEach((d, i) => {
-    d.filt.frequency.linearRampToValueAtTime(200 + energy * 900 + i * 80, now + 1);
-    const detune = Math.abs(momentum) > 0.5 ? (i % 2 === 0 ? -14 : 11) : 0;
-    d.osc.detune.linearRampToValueAtTime(detune, now + 2);
-  });
-}
-
-// ─── Playback loop ────────────────────────────────────────────────────────────
-function tick(ts) {
-  lastRaf = requestAnimationFrame(tick);
-  const dt = lastTs ? Math.min(ts - lastTs, 50) : 16.67;
-  lastTs = ts;
-
-  if (playing) {
-    playheadSec += (dt / 1000) * speed * 20; // 20 game-seconds per real second at 1x
-    if (playheadSec >= gameDuration()) {
-      playheadSec = gameDuration();
-      playing = false;
-      document.getElementById('play-btn').textContent = '▶';
-    }
-  }
-
-  renderFrame(dt);
-  updateScoreUI();
-  checkMoments();
-  updateAudio();
-}
-
-// ─── Seek ─────────────────────────────────────────────────────────────────────
-function seek(sec) {
-  playheadSec = Math.max(0, Math.min(gameDuration(), sec));
-  lastMomentIdx = -1;
-}
-
-// ─── Timeline drag ────────────────────────────────────────────────────────────
-const timeline = document.getElementById('timeline');
-let dragging = false;
-
-function timelineSeek(e) {
-  const rect = timeline.getBoundingClientRect();
-  const pct  = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
-  seek(pct * gameDuration());
-}
-
-timeline.addEventListener('mousedown', e => { dragging = true; timelineSeek(e); });
-window.addEventListener('mousemove',   e => { if (dragging) timelineSeek(e); });
-window.addEventListener('mouseup',     () => { dragging = false; });
-
-// ─── Controls ────────────────────────────────────────────────────────────────
-document.getElementById('play-btn').addEventListener('click', () => {
-  playing = !playing;
-  document.getElementById('play-btn').textContent = playing ? '❚❚' : '▶';
-  if (playing && playheadSec >= gameDuration()) seek(0);
-});
-
-document.querySelectorAll('.speed-btn').forEach(btn => {
-  btn.addEventListener('click', () => {
-    speed = parseFloat(btn.dataset.speed);
-    document.querySelectorAll('.speed-btn').forEach(b => b.classList.remove('active'));
-    btn.classList.add('active');
-  });
-});
-
-// ─── Start ────────────────────────────────────────────────────────────────────
-const startScreen = document.getElementById('start-screen');
-
-loadGame('0041500407').then(() => {
-  startScreen.addEventListener('click', () => {
-    initAudio();
-    startScreen.style.opacity = '0';
-    setTimeout(() => { startScreen.style.display = 'none'; }, 1200);
-    document.getElementById('score-display').style.opacity = '1';
-    document.getElementById('controls').style.opacity = '1';
-    playing = true;
-    document.getElementById('play-btn').textContent = '❚❚';
-    lastRaf = requestAnimationFrame(tick);
-  });
+  container.appendChild(card);
 });
 </script>
 </body>

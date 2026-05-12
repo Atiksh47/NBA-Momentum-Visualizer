@@ -1,0 +1,637 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>NBA Momentum Visualizer</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #000; overflow: hidden; font-family: 'Georgia', serif; color: #fff; }
+canvas { display: block; }
+
+#moment-overlay {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  text-align: center;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.6s ease;
+  z-index: 20;
+}
+#moment-label { font-size: clamp(11px, 1.8vw, 14px); letter-spacing: 0.35em; text-transform: uppercase; color: rgba(255,255,255,0.45); margin-bottom: 10px; }
+#moment-text  { font-size: clamp(24px, 5vw, 56px); font-weight: 300; letter-spacing: -0.02em; line-height: 1.1; }
+
+#score-display {
+  position: fixed;
+  top: 24px;
+  left: 50%;
+  transform: translateX(-50%);
+  text-align: center;
+  pointer-events: none;
+  z-index: 20;
+  opacity: 0;
+  transition: opacity 1s ease;
+}
+#score-line { font-size: clamp(18px, 3vw, 28px); font-weight: 300; letter-spacing: 0.05em; }
+#clock-line { font-size: clamp(10px, 1.5vw, 13px); letter-spacing: 0.3em; text-transform: uppercase; color: rgba(255,255,255,0.4); margin-top: 4px; }
+
+#back-btn {
+  position: fixed;
+  top: 24px;
+  left: 24px;
+  z-index: 30;
+  opacity: 0;
+  transition: opacity 1s ease;
+  background: none;
+  border: none;
+  color: rgba(255,255,255,0.25);
+  font-size: 12px;
+  letter-spacing: 0.25em;
+  text-transform: uppercase;
+  cursor: pointer;
+  text-decoration: none;
+  font-family: 'Georgia', serif;
+}
+#back-btn:hover { color: rgba(255,255,255,0.7); }
+
+#controls {
+  position: fixed;
+  bottom: 0; left: 0;
+  width: 100%;
+  padding: 40px 24px 20px;
+  z-index: 30;
+  opacity: 0;
+  transition: opacity 1s ease;
+  background: linear-gradient(transparent, rgba(0,0,0,0.7));
+}
+#timeline {
+  position: relative;
+  width: 100%;
+  height: 28px;
+  cursor: pointer;
+  margin-bottom: 12px;
+}
+#timeline-track {
+  position: absolute;
+  top: 50%; left: 0;
+  width: 100%; height: 2px;
+  background: rgba(255,255,255,0.15);
+  transform: translateY(-50%);
+  border-radius: 1px;
+}
+#timeline-fill { height: 100%; width: 0%; background: rgba(255,255,255,0.5); border-radius: 1px; }
+#timeline-thumb {
+  position: absolute;
+  top: 50%; left: 0%;
+  width: 10px; height: 10px;
+  background: #fff;
+  border-radius: 50%;
+  transform: translate(-50%, -50%);
+  transition: transform 0.1s ease;
+}
+#timeline:hover #timeline-thumb { transform: translate(-50%, -50%) scale(1.4); }
+
+.moment-tick {
+  position: absolute;
+  top: 50%;
+  width: 2px; height: 8px;
+  transform: translate(-50%, -50%);
+  border-radius: 1px;
+  opacity: 0.6;
+  cursor: pointer;
+}
+.moment-tick:hover::after {
+  content: attr(data-label);
+  position: absolute;
+  bottom: 14px; left: 50%;
+  transform: translateX(-50%);
+  font-size: 10px;
+  white-space: nowrap;
+  background: rgba(0,0,0,0.85);
+  padding: 2px 6px;
+  border-radius: 3px;
+  color: #fff;
+  font-family: 'Georgia', serif;
+  letter-spacing: 0.05em;
+}
+
+#control-row { display: flex; align-items: center; gap: 16px; }
+#play-btn {
+  background: none;
+  border: 1px solid rgba(255,255,255,0.3);
+  color: #fff;
+  width: 32px; height: 32px;
+  border-radius: 50%;
+  cursor: pointer;
+  font-size: 12px;
+  display: flex; align-items: center; justify-content: center;
+  flex-shrink: 0;
+  transition: border-color 0.2s;
+}
+#play-btn:hover { border-color: rgba(255,255,255,0.7); }
+#time-readout { font-size: 12px; letter-spacing: 0.1em; color: rgba(255,255,255,0.4); min-width: 90px; font-family: monospace; }
+#speed-btns { display: flex; gap: 6px; margin-left: auto; }
+.speed-btn {
+  background: none;
+  border: 1px solid rgba(255,255,255,0.15);
+  color: rgba(255,255,255,0.4);
+  font-size: 11px; padding: 3px 8px;
+  border-radius: 3px; cursor: pointer;
+  letter-spacing: 0.05em;
+  transition: color 0.2s, border-color 0.2s;
+  font-family: 'Georgia', serif;
+}
+.speed-btn:hover, .speed-btn.active { color: #fff; border-color: rgba(255,255,255,0.5); }
+
+/* ── Start screen ── */
+#start-screen {
+  position: fixed; inset: 0;
+  background: #000;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  z-index: 100; cursor: pointer;
+  transition: opacity 1.2s ease;
+}
+#start-screen h1 { font-size: clamp(28px, 5vw, 64px); font-weight: 300; letter-spacing: -0.02em; }
+#start-screen .meta { font-size: clamp(11px, 1.6vw, 14px); letter-spacing: 0.35em; text-transform: uppercase; color: rgba(255,255,255,0.3); margin-top: 10px; }
+#start-screen .prompt { font-size: 12px; letter-spacing: 0.3em; text-transform: uppercase; color: rgba(255,255,255,0.2); margin-top: 48px; animation: blink 2s ease-in-out infinite; }
+@keyframes blink { 0%,100%{opacity:.3} 50%{opacity:1} }
+
+/* ── End card ── */
+#end-card {
+  position: fixed; inset: 0;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  text-align: center;
+  z-index: 50;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 2s ease;
+}
+#end-card.visible { opacity: 1; pointer-events: auto; }
+#end-winner { font-size: clamp(11px, 1.8vw, 14px); letter-spacing: 0.4em; text-transform: uppercase; color: rgba(255,255,255,0.4); margin-bottom: 16px; }
+#end-score  { font-size: clamp(36px, 7vw, 88px); font-weight: 300; letter-spacing: -0.02em; margin-bottom: 20px; }
+#end-sentence { font-size: clamp(13px, 2vw, 18px); font-weight: 300; color: rgba(255,255,255,0.5); max-width: 560px; line-height: 1.6; margin-bottom: 48px; }
+#end-back {
+  font-size: 12px; letter-spacing: 0.3em; text-transform: uppercase;
+  color: rgba(255,255,255,0.25); text-decoration: none;
+  border: 1px solid rgba(255,255,255,0.15); padding: 10px 24px; border-radius: 3px;
+  transition: color 0.2s, border-color 0.2s;
+  font-family: 'Georgia', serif;
+}
+#end-back:hover { color: #fff; border-color: rgba(255,255,255,0.5); }
+</style>
+</head>
+<body>
+
+<div id="start-screen">
+  <h1 id="start-title">Loading…</h1>
+  <div class="meta" id="start-meta"></div>
+  <div class="prompt">click to begin</div>
+</div>
+
+<canvas id="c"></canvas>
+
+<a id="back-btn" href="index.html">← All Games</a>
+
+<div id="score-display">
+  <div id="score-line"></div>
+  <div id="clock-line"></div>
+</div>
+
+<div id="moment-overlay">
+  <div id="moment-label"></div>
+  <div id="moment-text"></div>
+</div>
+
+<div id="controls">
+  <div id="timeline">
+    <div id="timeline-track"><div id="timeline-fill"></div></div>
+    <div id="timeline-thumb"></div>
+  </div>
+  <div id="control-row">
+    <button id="play-btn">▶</button>
+    <span id="time-readout">Q1 0:00</span>
+    <div id="speed-btns">
+      <button class="speed-btn" data-speed="0.5">½×</button>
+      <button class="speed-btn active" data-speed="1">1×</button>
+      <button class="speed-btn" data-speed="2">2×</button>
+      <button class="speed-btn" data-speed="4">4×</button>
+    </div>
+  </div>
+</div>
+
+<div id="end-card">
+  <div id="end-winner"></div>
+  <div id="end-score"></div>
+  <div id="end-sentence"></div>
+  <a id="end-back" href="index.html">← Back to all games</a>
+</div>
+
+<script>
+// ─── Canvas ───────────────────────────────────────────────────────────────────
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+let W, H;
+function resize() { W = canvas.width = window.innerWidth; H = canvas.height = window.innerHeight; }
+resize();
+window.addEventListener('resize', resize);
+
+// ─── Game data ────────────────────────────────────────────────────────────────
+let game = null;
+
+// One curated sentence per game ID
+const GAME_SENTENCES = {
+  '0041500407': 'Down 3–1. No team had ever come back. Cleveland did.',
+  '0021501228': 'In his final game, Kobe Bryant scored 60 points and walked off forever.',
+  '0021501226': 'Golden State won their 73rd game, breaking a record that had stood for 21 years.',
+  '0021500568': 'A Christmas showdown between the two best teams in basketball.',
+  '0042100306': 'Steph Curry scored 43 points and finally won the one thing that had eluded him.',
+};
+
+async function loadGame(gameId) {
+  const res = await fetch(`data/${gameId}.json`);
+  game = await res.json();
+  document.getElementById('start-title').textContent = game.title;
+  document.getElementById('start-meta').textContent =
+    `${game.awayTeam} vs ${game.homeTeam}  ·  ${game.date}`;
+  buildTimeline();
+}
+
+// ─── Playback state ───────────────────────────────────────────────────────────
+let playing    = false;
+let playheadSec = 0;
+let speed      = 1;
+let lastTs     = null;
+let audioCtx   = null;
+let endShown   = false;
+
+function gameDuration() { return game ? game.duration : 2880; }
+
+function sampleAt(curve, sec) {
+  const idx = Math.min(Math.round(sec / game.sampleRate), curve.length - 1);
+  return curve[Math.max(0, idx)];
+}
+
+function clockString(sec) {
+  const period   = Math.min(Math.floor(sec / 720) + 1, 4);
+  const inPeriod = sec % 720;
+  const m = Math.floor(inPeriod / 60);
+  const s = Math.floor(inPeriod % 60);
+  return `Q${period}  ${m}:${s.toString().padStart(2, '0')}`;
+}
+
+// ─── Moment label humanizer ───────────────────────────────────────────────────
+function humanLabel(km) {
+  if (km.type === 'lead_change') {
+    // "Lead change  87-89" → "Lead Change"  (score is on screen already)
+    return 'Lead Change';
+  }
+  if (km.type === 'run_start') {
+    // "8-0 run" stays, but prefix with team tricode if available
+    return km.label;
+  }
+  if (km.type === 'clutch_shot') return 'Three!';
+  if (km.type === 'timeout')     return 'Timeout';
+  return km.label;
+}
+
+// ─── Particle pool ────────────────────────────────────────────────────────────
+const POOL_SIZE = 1000;
+const pool = [];
+class Particle {
+  constructor() { this.reset(); }
+  reset() {
+    this.x       = Math.random() * (W || 1920);
+    this.y       = Math.random() * (H || 1080);
+    this.vx      = (Math.random() - 0.5) * 1.5;
+    this.vy      = (Math.random() - 0.5) * 1.5;
+    this.life    = Math.random();
+    this.radius  = 0.8 + Math.random() * 2.2;
+    this.trail   = [];
+    this.special = Math.random() < 0.04;
+  }
+}
+for (let i = 0; i < POOL_SIZE; i++) pool.push(new Particle());
+
+// ─── Color helpers ────────────────────────────────────────────────────────────
+function hexToRgb(hex) {
+  const n = parseInt(hex.slice(1), 16);
+  return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+}
+function lerpColor(a, b, t) {
+  return [
+    Math.round(a[0] + (b[0] - a[0]) * t),
+    Math.round(a[1] + (b[1] - a[1]) * t),
+    Math.round(a[2] + (b[2] - a[2]) * t),
+  ];
+}
+function rgbStr(rgb, alpha) {
+  return `rgba(${rgb[0]},${rgb[1]},${rgb[2]},${alpha.toFixed(3)})`;
+}
+
+// ─── Render ───────────────────────────────────────────────────────────────────
+// endSettleT: 0 = normal playback, 1 = fully settled to winner color
+let endSettleT = 0;
+
+function renderFrame(dt) {
+  if (!game) return;
+
+  let momentum = sampleAt(game.momentumCurve, playheadSec);
+  let energy   = sampleAt(game.energyCurve,   playheadSec);
+
+  // On end card: lerp toward winner's side and calm down
+  if (endSettleT > 0) {
+    const winnerMomentum = game.finalScore.away > game.finalScore.home ? 1 : -1;
+    momentum = momentum + (winnerMomentum - momentum) * endSettleT;
+    energy   = energy   * (1 - endSettleT * 0.6);
+  }
+
+  const homeRgb  = hexToRgb(game.homeColor);
+  const awayRgb  = hexToRgb(game.awayColor);
+  const homeRgb2 = hexToRgb(game.homeColorSecondary);
+  const awayRgb2 = hexToRgb(game.awayColorSecondary);
+  const t = (momentum + 1) / 2;
+  const primary   = lerpColor(homeRgb,  awayRgb,  t);
+  const secondary = lerpColor(homeRgb2, awayRgb2, t);
+
+  ctx.fillStyle = `rgba(0,0,0,${0.18 - energy * 0.05})`;
+  ctx.fillRect(0, 0, W, H);
+
+  if (energy > 0.15) {
+    const r   = Math.min(W, H) * 0.55;
+    const grd = ctx.createRadialGradient(W/2, H/2, 0, W/2, H/2, r);
+    grd.addColorStop(0, rgbStr(primary, energy * 0.07));
+    grd.addColorStop(1, 'rgba(0,0,0,0)');
+    ctx.fillStyle = grd;
+    ctx.fillRect(0, 0, W, H);
+  }
+
+  const activeCount = Math.round(150 + energy * 850);
+  const maxSpeed    = 1.5 + energy * 4;
+  const driftX      = momentum * 0.6;
+
+  for (let i = 0; i < POOL_SIZE; i++) {
+    const p = pool[i];
+    if (i >= activeCount) { p.trail = []; continue; }
+
+    p.trail.push({ x: p.x, y: p.y });
+    const trailLen = Math.round(2 + energy * 6);
+    if (p.trail.length > trailLen) p.trail.shift();
+
+    p.vx += driftX * 0.04 + (Math.random() - 0.5) * 0.25 * energy;
+    p.vy +=                  (Math.random() - 0.5) * 0.25 * energy;
+    p.vx += (W / 2 - p.x) * 0.0003;
+    p.vy += (H / 2 - p.y) * 0.0003;
+
+    const spd = Math.hypot(p.vx, p.vy);
+    if (spd > maxSpeed) { p.vx = p.vx / spd * maxSpeed; p.vy = p.vy / spd * maxSpeed; }
+
+    p.x += p.vx * dt / 16.67;
+    p.y += p.vy * dt / 16.67;
+    p.life += 0.005 * dt / 16.67;
+
+    if (p.x < -20) p.x = W + 20;
+    if (p.x > W+20) p.x = -20;
+    if (p.y < -20) p.y = H + 20;
+    if (p.y > H+20) p.y = -20;
+
+    const alpha = (0.25 + energy * 0.55) * (0.6 + 0.4 * Math.sin(p.life * Math.PI * 2));
+
+    if (p.trail.length > 1) {
+      ctx.beginPath();
+      ctx.moveTo(p.trail[0].x, p.trail[0].y);
+      for (let j = 1; j < p.trail.length; j++) ctx.lineTo(p.trail[j].x, p.trail[j].y);
+      ctx.strokeStyle = rgbStr(secondary, alpha * 0.3);
+      ctx.lineWidth   = p.radius * 0.6;
+      ctx.stroke();
+    }
+
+    if (p.special && energy > 0.4) {
+      const gr = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, p.radius * 9);
+      gr.addColorStop(0, rgbStr(primary, alpha * 0.4));
+      gr.addColorStop(1, 'rgba(0,0,0,0)');
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, p.radius * 9, 0, Math.PI * 2);
+      ctx.fillStyle = gr;
+      ctx.fill();
+    }
+
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, p.radius * (1 + energy * 0.4), 0, Math.PI * 2);
+    ctx.fillStyle = rgbStr(primary, alpha);
+    ctx.fill();
+  }
+}
+
+// ─── Score UI ─────────────────────────────────────────────────────────────────
+function findScore(sec) {
+  let h = 0, a = 0;
+  for (const e of game.events) {
+    if (e.t > sec) break;
+    if (e.homeScore > 0 || e.awayScore > 0) { h = e.homeScore; a = e.awayScore; }
+  }
+  return { h, a };
+}
+
+function updateScoreUI() {
+  const { h, a } = findScore(playheadSec);
+  document.getElementById('score-line').textContent = `${game.homeTeam}  ${h} — ${a}  ${game.awayTeam}`;
+  document.getElementById('clock-line').textContent = clockString(playheadSec);
+  const pct = playheadSec / gameDuration() * 100;
+  document.getElementById('timeline-fill').style.width = pct + '%';
+  document.getElementById('timeline-thumb').style.left  = pct + '%';
+  document.getElementById('time-readout').textContent   = clockString(playheadSec);
+}
+
+// ─── Moment overlays ──────────────────────────────────────────────────────────
+let lastMomentIdx = -1;
+const overlay = document.getElementById('moment-overlay');
+
+function checkMoments() {
+  if (!game.keyMoments.length) return;
+  const windowSec = 80; // game-seconds to show each overlay (≈4 real-sec at 1x)
+  for (let i = 0; i < game.keyMoments.length; i++) {
+    const km   = game.keyMoments[i];
+    const diff = playheadSec - km.t;
+    if (diff >= 0 && diff < windowSec) {
+      if (lastMomentIdx !== i) {
+        lastMomentIdx = i;
+        document.getElementById('moment-label').textContent = clockString(km.t);
+        document.getElementById('moment-text').textContent  = humanLabel(km);
+        overlay.style.opacity = 1;
+      }
+      return;
+    }
+  }
+  if (lastMomentIdx !== -1) { overlay.style.opacity = 0; lastMomentIdx = -1; }
+}
+
+// ─── End card ─────────────────────────────────────────────────────────────────
+function showEndCard() {
+  if (endShown) return;
+  endShown = true;
+  playing  = false;
+  document.getElementById('play-btn').textContent = '▶';
+
+  const { home, away } = game.finalScore;
+  const winnerTeam = home > away ? game.homeTeam : game.awayTeam;
+  document.getElementById('end-winner').textContent  = `${winnerTeam} Win`;
+  document.getElementById('end-score').textContent   = `${game.homeTeam}  ${home} — ${away}  ${game.awayTeam}`;
+  document.getElementById('end-sentence').textContent = GAME_SENTENCES[game.gameId] || game.subtitle;
+
+  const card = document.getElementById('end-card');
+  card.classList.add('visible');
+
+  // Gradually settle particles to winner color
+  let t = 0;
+  const settle = setInterval(() => {
+    t = Math.min(t + 0.01, 1);
+    endSettleT = t;
+    if (t >= 1) clearInterval(settle);
+  }, 50);
+}
+
+// ─── Timeline ─────────────────────────────────────────────────────────────────
+function buildTimeline() {
+  const track = document.getElementById('timeline-track');
+  track.querySelectorAll('.moment-tick').forEach(el => el.remove());
+
+  const typeColor = {
+    lead_change: '#888',
+    run_start:   '#e8a020',
+    clutch_shot: '#e05050',
+    timeout:     '#444',
+  };
+
+  game.keyMoments.forEach(km => {
+    const pct  = km.t / game.duration * 100;
+    const tick = document.createElement('div');
+    tick.className        = 'moment-tick';
+    tick.style.left       = pct + '%';
+    tick.style.background = typeColor[km.type] || '#888';
+    tick.setAttribute('data-label', humanLabel(km));
+    tick.addEventListener('click', e => { e.stopPropagation(); seek(km.t); });
+    track.appendChild(tick);
+  });
+}
+
+// ─── Audio ────────────────────────────────────────────────────────────────────
+function initAudio() {
+  audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  const master = audioCtx.createGain();
+  master.gain.value = 0;
+  master.connect(audioCtx.destination);
+  master.gain.linearRampToValueAtTime(0.3, audioCtx.currentTime + 2);
+
+  const conv     = audioCtx.createConvolver();
+  const convGain = audioCtx.createGain();
+  convGain.gain.value = 0.4;
+  conv.connect(convGain); convGain.connect(master);
+  const rate = audioCtx.sampleRate;
+  const buf  = audioCtx.createBuffer(2, rate * 2.5, rate);
+  for (let ch = 0; ch < 2; ch++) {
+    const d = buf.getChannelData(ch);
+    for (let i = 0; i < d.length; i++) d[i] = (Math.random()*2-1) * Math.pow(1-i/d.length, 3);
+  }
+  conv.buffer = buf;
+
+  window._drones = [55, 82.4, 110, 164.8].map((f, i) => {
+    const osc  = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+    const filt = audioCtx.createBiquadFilter();
+    osc.type = i % 2 === 0 ? 'sine' : 'triangle';
+    osc.frequency.value = f;
+    filt.type = 'lowpass'; filt.frequency.value = 500;
+    gain.gain.value = 0.05 - i * 0.01;
+    osc.connect(filt); filt.connect(gain);
+    gain.connect(master); gain.connect(conv);
+    osc.start();
+    return { osc, gain, filt };
+  });
+  window._audioMaster = master;
+}
+
+function updateAudio() {
+  if (!audioCtx || !game) return;
+  const now      = audioCtx.currentTime;
+  const energy   = sampleAt(game.energyCurve,   playheadSec);
+  const momentum = sampleAt(game.momentumCurve,  playheadSec);
+  window._audioMaster.gain.linearRampToValueAtTime(playing ? 0.15 + energy * 0.35 : 0, now + 0.5);
+  window._drones.forEach((d, i) => {
+    d.filt.frequency.linearRampToValueAtTime(200 + energy * 900 + i * 80, now + 1);
+    const detune = Math.abs(momentum) > 0.5 ? (i % 2 === 0 ? -14 : 11) : 0;
+    d.osc.detune.linearRampToValueAtTime(detune, now + 2);
+  });
+}
+
+// ─── Main loop ────────────────────────────────────────────────────────────────
+function tick(ts) {
+  requestAnimationFrame(tick);
+  const dt = lastTs ? Math.min(ts - lastTs, 50) : 16.67;
+  lastTs = ts;
+
+  if (playing) {
+    playheadSec += (dt / 1000) * speed * 20;
+    if (playheadSec >= gameDuration()) {
+      playheadSec = gameDuration();
+      showEndCard();
+    }
+  }
+
+  renderFrame(dt);
+  if (!endShown) { updateScoreUI(); checkMoments(); }
+  updateAudio();
+}
+
+function seek(sec) {
+  playheadSec   = Math.max(0, Math.min(gameDuration(), sec));
+  lastMomentIdx = -1;
+}
+
+// ─── Timeline drag ────────────────────────────────────────────────────────────
+const timeline = document.getElementById('timeline');
+let dragging   = false;
+function timelineSeek(e) {
+  const rect = timeline.getBoundingClientRect();
+  seek(Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width)) * gameDuration());
+}
+timeline.addEventListener('mousedown', e => { dragging = true; timelineSeek(e); });
+window.addEventListener('mousemove',   e => { if (dragging) timelineSeek(e); });
+window.addEventListener('mouseup',     () => { dragging = false; });
+
+// ─── Controls ────────────────────────────────────────────────────────────────
+document.getElementById('play-btn').addEventListener('click', () => {
+  playing = !playing;
+  document.getElementById('play-btn').textContent = playing ? '❚❚' : '▶';
+  if (playing && playheadSec >= gameDuration()) { endShown = false; endSettleT = 0; document.getElementById('end-card').classList.remove('visible'); seek(0); }
+});
+
+document.querySelectorAll('.speed-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    speed = parseFloat(btn.dataset.speed);
+    document.querySelectorAll('.speed-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+  });
+});
+
+// ─── Boot ─────────────────────────────────────────────────────────────────────
+const gameId     = new URLSearchParams(location.search).get('game') || '0041500407';
+const startScreen = document.getElementById('start-screen');
+
+loadGame(gameId).then(() => {
+  startScreen.addEventListener('click', () => {
+    initAudio();
+    startScreen.style.opacity = '0';
+    setTimeout(() => { startScreen.style.display = 'none'; }, 1200);
+    document.getElementById('score-display').style.opacity = '1';
+    document.getElementById('controls').style.opacity      = '1';
+    document.getElementById('back-btn').style.opacity      = '1';
+    playing = true;
+    document.getElementById('play-btn').textContent = '❚❚';
+    requestAnimationFrame(tick);
+  });
+});
+</script>
+</body>
+</html>
