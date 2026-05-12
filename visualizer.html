@@ -145,6 +145,52 @@ canvas { display: block; }
 }
 .speed-btn:hover, .speed-btn.active { color: #fff; border-color: rgba(255,255,255,0.5); }
 
+/* ── Mode toggle ── */
+#mode-btn {
+  background: none;
+  border: 1px solid rgba(255,255,255,0.15);
+  color: rgba(255,255,255,0.4);
+  font-size: 11px; padding: 3px 10px;
+  border-radius: 3px; cursor: pointer;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  transition: color 0.2s, border-color 0.2s;
+  font-family: 'Georgia', serif;
+  flex-shrink: 0;
+}
+#mode-btn:hover { color: #fff; border-color: rgba(255,255,255,0.5); }
+#mode-btn.anime { color: #ff4466; border-color: rgba(255,68,102,0.5); }
+
+/* ── Anime chyron overlay ── */
+#chyron {
+  position: fixed;
+  bottom: 110px;
+  left: 0;
+  pointer-events: none;
+  z-index: 20;
+  overflow: hidden;
+  height: 48px;
+  display: flex;
+  align-items: center;
+}
+#chyron-inner {
+  padding: 0 20px 0 0;
+  font-family: 'Arial Black', 'Arial', sans-serif;
+  font-weight: 900;
+  font-size: clamp(18px, 3.5vw, 32px);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: #fff;
+  white-space: nowrap;
+  transform: translateX(-110%);
+  transition: transform 0s;
+  background: #ff4466;
+  padding: 6px 20px 6px 24px;
+  clip-path: polygon(0 0, calc(100% - 12px) 0, 100% 50%, calc(100% - 12px) 100%, 0 100%);
+}
+#chyron-inner.wipe-in  { transform: translateX(0);    transition: transform 0.18s cubic-bezier(0.2,0,0,1); }
+#chyron-inner.wipe-out { transform: translateX(-110%); transition: transform 0.22s cubic-bezier(0.4,0,1,1); }
+
 /* ── Start screen ── */
 #start-screen {
   position: fixed; inset: 0;
@@ -218,8 +264,11 @@ canvas { display: block; }
       <button class="speed-btn" data-speed="2">2×</button>
       <button class="speed-btn" data-speed="4">4×</button>
     </div>
+    <button id="mode-btn">Minimal</button>
   </div>
 </div>
+
+<div id="chyron"><div id="chyron-inner"></div></div>
 
 <div id="end-card">
   <div id="end-winner"></div>
@@ -332,17 +381,53 @@ function rgbStr(rgb, alpha) {
   return `rgba(${rgb[0]},${rgb[1]},${rgb[2]},${alpha.toFixed(3)})`;
 }
 
-// ─── Render ───────────────────────────────────────────────────────────────────
+// ─── Renderer system ─────────────────────────────────────────────────────────
 // endSettleT: 0 = normal playback, 1 = fully settled to winner color
-let endSettleT = 0;
+let endSettleT   = 0;
+let currentMode  = 'minimal'; // 'minimal' | 'anime'
 
-function renderFrame(dt) {
-  if (!game) return;
+// Anime-only state
+let shakeX = 0, shakeY = 0, shakeTtl = 0;    // screen shake
+let flashAlpha  = 0;                           // white flash
+let runGlow     = 0;                           // power-up glow intensity (0→1)
+let chyronTimer = 0;                           // ms remaining for current chyron
+const CHYRON_DURATION = 1800;                  // ms
 
+function triggerShake(intensity) {
+  shakeTtl = Math.round(intensity * 18); // frames
+  shakeX   = (Math.random() - 0.5) * intensity * 14;
+  shakeY   = (Math.random() - 0.5) * intensity * 8;
+}
+
+function triggerFlash(alpha) {
+  flashAlpha = Math.min(1, flashAlpha + alpha);
+}
+
+function triggerRunGlow(intensity) {
+  runGlow = Math.max(runGlow, intensity);
+}
+
+function showChyron(text, color) {
+  const inner = document.getElementById('chyron-inner');
+  inner.style.background = color || '#ff4466';
+  inner.textContent = text;
+  inner.classList.remove('wipe-out');
+  void inner.offsetWidth; // force reflow so transition fires
+  inner.classList.add('wipe-in');
+  chyronTimer = CHYRON_DURATION;
+}
+
+function hideChyron() {
+  const inner = document.getElementById('chyron-inner');
+  inner.classList.remove('wipe-in');
+  inner.classList.add('wipe-out');
+  chyronTimer = 0;
+}
+
+// Shared: simulate particle physics and return computed visual params
+function simulateAndGetParams(dt) {
   let momentum = sampleAt(game.momentumCurve, playheadSec);
   let energy   = sampleAt(game.energyCurve,   playheadSec);
-
-  // On end card: lerp toward winner's side and calm down
   if (endSettleT > 0) {
     const winnerMomentum = game.finalScore.away > game.finalScore.home ? 1 : -1;
     momentum = momentum + (winnerMomentum - momentum) * endSettleT;
@@ -353,21 +438,9 @@ function renderFrame(dt) {
   const awayRgb  = hexToRgb(game.awayColor);
   const homeRgb2 = hexToRgb(game.homeColorSecondary);
   const awayRgb2 = hexToRgb(game.awayColorSecondary);
-  const t = (momentum + 1) / 2;
+  const t       = (momentum + 1) / 2;
   const primary   = lerpColor(homeRgb,  awayRgb,  t);
   const secondary = lerpColor(homeRgb2, awayRgb2, t);
-
-  ctx.fillStyle = `rgba(0,0,0,${0.18 - energy * 0.05})`;
-  ctx.fillRect(0, 0, W, H);
-
-  if (energy > 0.15) {
-    const r   = Math.min(W, H) * 0.55;
-    const grd = ctx.createRadialGradient(W/2, H/2, 0, W/2, H/2, r);
-    grd.addColorStop(0, rgbStr(primary, energy * 0.07));
-    grd.addColorStop(1, 'rgba(0,0,0,0)');
-    ctx.fillStyle = grd;
-    ctx.fillRect(0, 0, W, H);
-  }
 
   const activeCount = Math.round(150 + energy * 850);
   const maxSpeed    = 1.5 + energy * 4;
@@ -375,11 +448,11 @@ function renderFrame(dt) {
 
   for (let i = 0; i < POOL_SIZE; i++) {
     const p = pool[i];
+    const maxTrail = currentMode === 'anime' ? Math.round(6 + energy * 22) : Math.round(2 + energy * 6);
     if (i >= activeCount) { p.trail = []; continue; }
 
     p.trail.push({ x: p.x, y: p.y });
-    const trailLen = Math.round(2 + energy * 6);
-    if (p.trail.length > trailLen) p.trail.shift();
+    if (p.trail.length > maxTrail) p.trail.shift();
 
     p.vx += driftX * 0.04 + (Math.random() - 0.5) * 0.25 * energy;
     p.vy +=                  (Math.random() - 0.5) * 0.25 * energy;
@@ -397,7 +470,29 @@ function renderFrame(dt) {
     if (p.x > W+20) p.x = -20;
     if (p.y < -20) p.y = H + 20;
     if (p.y > H+20) p.y = -20;
+  }
 
+  return { momentum, energy, primary, secondary, activeCount };
+}
+
+// ─── Minimalist renderer ──────────────────────────────────────────────────────
+function drawMinimal(dt) {
+  const { energy, primary, secondary, activeCount } = simulateAndGetParams(dt);
+
+  ctx.fillStyle = `rgba(0,0,0,${0.18 - energy * 0.05})`;
+  ctx.fillRect(0, 0, W, H);
+
+  if (energy > 0.15) {
+    const r   = Math.min(W, H) * 0.55;
+    const grd = ctx.createRadialGradient(W/2, H/2, 0, W/2, H/2, r);
+    grd.addColorStop(0, rgbStr(primary, energy * 0.07));
+    grd.addColorStop(1, 'rgba(0,0,0,0)');
+    ctx.fillStyle = grd;
+    ctx.fillRect(0, 0, W, H);
+  }
+
+  for (let i = 0; i < activeCount; i++) {
+    const p     = pool[i];
     const alpha = (0.25 + energy * 0.55) * (0.6 + 0.4 * Math.sin(p.life * Math.PI * 2));
 
     if (p.trail.length > 1) {
@@ -424,6 +519,123 @@ function renderFrame(dt) {
     ctx.fillStyle = rgbStr(primary, alpha);
     ctx.fill();
   }
+}
+
+// ─── Anime renderer ───────────────────────────────────────────────────────────
+function drawAnime(dt) {
+  const { energy, momentum, primary, secondary, activeCount } = simulateAndGetParams(dt);
+
+  // Advance shake
+  if (shakeTtl > 0) {
+    shakeTtl--;
+    shakeX *= 0.75;
+    shakeY *= 0.75;
+    if (shakeTtl === 0) { shakeX = 0; shakeY = 0; }
+  }
+
+  // Decay run glow and flash
+  runGlow    = Math.max(0, runGlow    - 0.008 * dt / 16.67);
+  flashAlpha = Math.max(0, flashAlpha - 0.05  * dt / 16.67);
+
+  // Advance chyron
+  if (chyronTimer > 0) {
+    chyronTimer -= dt;
+    if (chyronTimer <= 0) hideChyron();
+  }
+
+  ctx.save();
+  ctx.translate(shakeX, shakeY);
+
+  // Dark trail fade — less transparent than minimal so trails burn in harder
+  ctx.fillStyle = `rgba(0,0,0,${0.12 - energy * 0.04})`;
+  ctx.fillRect(-20, -20, W + 40, H + 40);
+
+  // Vivid central glow
+  if (energy > 0.1) {
+    const r   = Math.min(W, H) * 0.7;
+    const grd = ctx.createRadialGradient(W/2, H/2, 0, W/2, H/2, r);
+    grd.addColorStop(0, rgbStr(primary, energy * 0.14));
+    grd.addColorStop(1, 'rgba(0,0,0,0)');
+    ctx.fillStyle = grd;
+    ctx.fillRect(-20, -20, W + 40, H + 40);
+  }
+
+  for (let i = 0; i < activeCount; i++) {
+    const p     = pool[i];
+    // More vivid, less subtly pulsing
+    const alpha = 0.45 + energy * 0.5;
+
+    // Speed-line trail: two strokes — thin full trail + thick near-tip
+    if (p.trail.length > 1) {
+      // Full trail (thin, faded)
+      ctx.beginPath();
+      ctx.moveTo(p.trail[0].x, p.trail[0].y);
+      for (let j = 1; j < p.trail.length; j++) ctx.lineTo(p.trail[j].x, p.trail[j].y);
+      ctx.strokeStyle = rgbStr(secondary, alpha * 0.18);
+      ctx.lineWidth   = p.radius * 0.5;
+      ctx.stroke();
+      // Bright tip segment (last 30% of trail)
+      const tipStart = Math.max(0, Math.floor(p.trail.length * 0.7));
+      if (tipStart < p.trail.length - 1) {
+        ctx.beginPath();
+        ctx.moveTo(p.trail[tipStart].x, p.trail[tipStart].y);
+        for (let j = tipStart + 1; j < p.trail.length; j++) ctx.lineTo(p.trail[j].x, p.trail[j].y);
+        ctx.strokeStyle = rgbStr(secondary, alpha * 0.65);
+        ctx.lineWidth   = p.radius * 1.6;
+        ctx.stroke();
+      }
+    }
+
+    // Power-up bloom halo on all particles during a run
+    if (runGlow > 0.05) {
+      const glowR = p.radius * (6 + runGlow * 14);
+      const gr = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, glowR);
+      gr.addColorStop(0, rgbStr(primary, runGlow * 0.35));
+      gr.addColorStop(1, 'rgba(0,0,0,0)');
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, glowR, 0, Math.PI * 2);
+      ctx.fillStyle = gr;
+      ctx.fill();
+    }
+
+    // Particle dot — larger and sharper than minimal
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, p.radius * (1.5 + energy * 0.8), 0, Math.PI * 2);
+    ctx.fillStyle = rgbStr(primary, alpha);
+    ctx.fill();
+  }
+
+  // Radial speed lines on big events (impact frame)
+  if (flashAlpha > 0.05) {
+    // Full-screen flash layer
+    ctx.fillStyle = `rgba(255,255,255,${flashAlpha * 0.18})`;
+    ctx.fillRect(-20, -20, W + 40, H + 40);
+
+    // Radial lines from center
+    const lineCount = 24;
+    const maxLen    = Math.min(W, H) * 0.55 * flashAlpha;
+    ctx.save();
+    ctx.translate(W / 2, H / 2);
+    for (let i = 0; i < lineCount; i++) {
+      const angle = (i / lineCount) * Math.PI * 2;
+      const len   = maxLen * (0.5 + Math.random() * 0.5);
+      ctx.beginPath();
+      ctx.moveTo(Math.cos(angle) * 30, Math.sin(angle) * 30);
+      ctx.lineTo(Math.cos(angle) * len, Math.sin(angle) * len);
+      ctx.strokeStyle = rgbStr(primary, flashAlpha * 0.6);
+      ctx.lineWidth   = 1.5 + flashAlpha * 3;
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  ctx.restore(); // undo shake translate
+}
+
+function renderFrame(dt) {
+  if (!game) return;
+  if (currentMode === 'anime') drawAnime(dt);
+  else                         drawMinimal(dt);
 }
 
 // ─── Score UI ─────────────────────────────────────────────────────────────────
@@ -465,15 +677,17 @@ function checkMoments() {
     if (diff >= 0 && diff < windowSec) {
       if (lastMomentIdx !== i) {
         lastMomentIdx = i;
-        document.getElementById('moment-label').textContent = clockString(km.t);
-        document.getElementById('moment-text').textContent  = humanLabel(km);
-        overlay.style.opacity = 1;
+        if (currentMode === 'minimal') {
+          document.getElementById('moment-label').textContent = clockString(km.t);
+          document.getElementById('moment-text').textContent  = humanLabel(km);
+          overlay.style.opacity = 1;
+        }
         fireMomentAudio(km);
       }
       return;
     }
   }
-  if (lastMomentIdx !== -1) { overlay.style.opacity = 0; lastMomentIdx = -1; }
+  if (lastMomentIdx !== -1) { if (currentMode === 'minimal') overlay.style.opacity = 0; lastMomentIdx = -1; }
 }
 
 // ─── End card ─────────────────────────────────────────────────────────────────
@@ -604,6 +818,26 @@ function firePluck(freq, vol) {
   src.start(now);
 }
 
+// Anime mode: aggressive sawtooth pluck with pitch drop
+function fireImpactPluck(freq, vol) {
+  if (!audioCtx) return;
+  const now  = audioCtx.currentTime;
+  const osc  = audioCtx.createOscillator();
+  const gain = audioCtx.createGain();
+  const dist = audioCtx.createWaveShaper();
+  // Mild soft-clip waveshaper
+  const curve = new Float32Array(256);
+  for (let i = 0; i < 256; i++) { const x = i * 2 / 255 - 1; curve[i] = (3 + 20) * x / (Math.PI + 20 * Math.abs(x)); }
+  dist.curve = curve;
+  osc.type = 'sawtooth';
+  osc.frequency.setValueAtTime(freq * 1.5, now);
+  osc.frequency.exponentialRampToValueAtTime(freq * 0.7, now + 0.15);
+  gain.gain.setValueAtTime(vol, now);
+  gain.gain.exponentialRampToValueAtTime(0.001, now + 0.5);
+  osc.connect(dist); dist.connect(gain); gain.connect(_master); gain.connect(_conv);
+  osc.start(now); osc.stop(now + 0.55);
+}
+
 // Fire a short sharp transient (turnover / block)
 function fireTransient(vol) {
   if (!audioCtx) return;
@@ -647,37 +881,64 @@ function fireLeadChangeMod() {
 
 // Per-event audio punctuation — called once per event as playhead crosses it
 function fireEventAudio(evt) {
-  if (!audioCtx || !playing) return;
-  const energy = sampleAt(game.energyCurve, playheadSec);
+  const energy = game ? sampleAt(game.energyCurve, playheadSec) : 0;
 
   if (evt.type === 'score') {
-    // Home team = higher pitch (440Hz range), away = lower (220Hz range)
-    const freq = evt.team === 'home' ? 440 + evt.scoreDelta * 40 : 220 + evt.scoreDelta * 20;
-    firePluck(freq, 0.06 + energy * 0.08);
+    if (audioCtx && playing) {
+      const freq = evt.team === 'home' ? 440 + evt.scoreDelta * 40 : 220 + evt.scoreDelta * 20;
+      // Anime: sawtooth pluck for more aggression; minimal: sine pluck
+      if (currentMode === 'anime') {
+        fireImpactPluck(freq, 0.07 + energy * 0.09);
+      } else {
+        firePluck(freq, 0.06 + energy * 0.08);
+      }
+    }
+    if (currentMode === 'anime' && evt.scoreDelta >= 3) {
+      triggerShake(0.4 + energy * 0.5);
+      triggerFlash(0.3 + energy * 0.3);
+    }
   } else if (evt.type === 'turnover') {
-    fireTransient(0.05 + energy * 0.06);
+    if (audioCtx && playing) fireTransient(0.05 + energy * 0.06);
+    if (currentMode === 'anime') { triggerShake(0.3); triggerFlash(0.15); }
   } else if (evt.type === 'timeout') {
-    // Duck audio for ~3 real seconds
-    if (!audioCtx || !_duck) return;
-    const now = audioCtx.currentTime;
-    _duck.gain.cancelScheduledValues(now);
-    _duck.gain.setValueAtTime(_duck.gain.value, now);
-    _duck.gain.linearRampToValueAtTime(0.1, now + 0.3);
-    _duck.gain.linearRampToValueAtTime(1.0, now + 3.5);
+    if (audioCtx && playing && _duck) {
+      const now = audioCtx.currentTime;
+      _duck.gain.cancelScheduledValues(now);
+      _duck.gain.setValueAtTime(_duck.gain.value, now);
+      _duck.gain.linearRampToValueAtTime(0.1, now + 0.3);
+      _duck.gain.linearRampToValueAtTime(1.0, now + 3.5);
+    }
   }
 }
 
 // Called by checkMoments when a key moment is newly entered
 function fireMomentAudio(km) {
-  if (!audioCtx || !playing) return;
-  if (km.type === 'lead_change') {
-    const now = audioCtx.currentTime;
-    if (now - _lastDroneModT > 4) { // don't fire too often
-      _lastDroneModT = now;
-      fireLeadChangeMod();
+  if (audioCtx && playing) {
+    if (km.type === 'lead_change') {
+      const now = audioCtx.currentTime;
+      if (now - _lastDroneModT > 4) {
+        _lastDroneModT = now;
+        fireLeadChangeMod();
+      }
+    } else if (km.type === 'run_start') {
+      fireSwell(0.08 + km.intensity * 0.1);
     }
-  } else if (km.type === 'run_start') {
-    fireSwell(0.08 + km.intensity * 0.1);
+  }
+
+  // Anime visual effects for key moments
+  if (currentMode === 'anime') {
+    if (km.type === 'run_start') {
+      triggerRunGlow(0.5 + km.intensity * 0.5);
+      triggerFlash(0.5 + km.intensity * 0.4);
+      triggerShake(0.6 + km.intensity * 0.6);
+      showChyron(km.label, '#ff4466');
+    } else if (km.type === 'lead_change') {
+      triggerFlash(0.35);
+      triggerShake(0.4);
+      showChyron('Lead Change', '#3399ff');
+    } else if (km.type === 'timeout') {
+      showChyron('Timeout', '#666');
+    }
   }
 }
 
@@ -780,6 +1041,23 @@ document.querySelectorAll('.speed-btn').forEach(btn => {
     document.querySelectorAll('.speed-btn').forEach(b => b.classList.remove('active'));
     btn.classList.add('active');
   });
+});
+
+// ─── Mode toggle ──────────────────────────────────────────────────────────────
+const modeBtn = document.getElementById('mode-btn');
+modeBtn.addEventListener('click', () => {
+  currentMode = currentMode === 'minimal' ? 'anime' : 'minimal';
+  const isAnime = currentMode === 'anime';
+  modeBtn.textContent = isAnime ? 'Anime' : 'Minimal';
+  modeBtn.classList.toggle('anime', isAnime);
+  // Reset anime transient state on switch
+  if (!isAnime) {
+    shakeX = 0; shakeY = 0; shakeTtl = 0;
+    flashAlpha = 0; runGlow = 0;
+    hideChyron();
+  }
+  // Moment overlay: show in minimal, hide in anime (chyron replaces it)
+  document.getElementById('moment-overlay').style.display = isAnime ? 'none' : '';
 });
 
 // ─── Boot ─────────────────────────────────────────────────────────────────────
