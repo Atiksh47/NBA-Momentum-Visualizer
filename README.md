@@ -2,83 +2,86 @@
 
 > What did the game *feel* like?
 
-A cinematic, data-driven experience that transforms NBA play-by-play into a living visual and audio landscape. Not a stats dashboard — a mood engine.
+Historic games become living audiovisual experiences.
+
+Momentum shifts distort the particle field.  
+Scoring runs trigger shockwaves.  
+Clutch possessions tighten the soundtrack into low-frequency pulses.
+
+The same game — experienced four ways:
+
+- **Minimal** — motion graphics. Color and particle drift.
+- **Anime** — speed lines, impact frames, screen shake.
+- **Cosmic** — teams as colliding star systems. Gravity bends with momentum.
+- **Broadcast** — the television layer. Score bug, foul warnings, live run banner.
+
+Not a replay. An interpretation.
 
 ---
 
-## What it does
-
-Pick a historic game. Watch the momentum shift in real time as the data drives a particle field, a generative soundscape, and key moment overlays. Four visual modes let you experience the same game through completely different aesthetics.
-
----
-
-## Visual modes
-
-| Mode | Description |
-|------|-------------|
-| **Minimal** | Soft particle field. Team colors blend with momentum. Text overlays for key moments. |
-| **Anime** | Speed-line trails, screen shake, impact flashes, chyron wipe-ins. Same data, different medium. |
-| **Cosmic** | Three.js WebGL. Teams as star nebulae. Momentum warps gravity. Bloom + film grain post-processing. |
-| **Broadcast** | TV graphics package. Score bug, momentum bar, shooting streak tags, foul trouble warnings, live run banner. |
+<!-- Screenshots / GIFs go here — one per mode -->
+<!-- ![Minimal mode](docs/minimal.gif) -->
+<!-- ![Cosmic mode](docs/cosmic.gif) -->
 
 ---
 
-## Games included
+## The signal
 
-| Game | Date |
-|------|------|
-| 2016 Finals Game 7 — The Comeback | Jun 19, 2016 |
-| Kobe's Last Game — 60 points | Apr 13, 2016 |
-| Warriors Win 73 | Apr 13, 2016 |
-| Christmas 2015 — Warriors vs Cavs | Dec 25, 2015 |
-| 2022 Finals Game 6 — Curry 43 | Jun 16, 2022 |
+Every game is reduced to two curves, sampled once per second:
+
+**Crowd Heat** — overall game intensity, 0→1. Driven by pace, closeness, scoring bursts, and turnover chaos. This is the energy in the room.
+
+**Momentum** — which team owns the moment, −1.0 to +1.0. Derived from recent scoring runs, field goal streaks, and time pressure. It shifts slowly, then suddenly.
+
+These two numbers drive everything — color, particle velocity, audio filter cutoff, gravitational pull in the 3D nebula. The visuals are not decorative. They *are* the data.
+
+Additional signals feed the Broadcast layer:
+
+- **Rolling FG%** — hot streaks and cold spells, team by team, over the last 10 shots
+- **Foul pressure** — cumulative fouls per half, flagged when a team is in danger
+- **Chaos index** — turnover density per 60-second window; spikes when the game is unraveling
 
 ---
 
-## How it works
+## Games
 
-### Data pipeline
+Five games chosen for emotional weight, not statistical significance.
 
-A Python script fetches play-by-play from the NBA Stats API and pre-processes it into static JSON files. No server required at runtime — everything runs from flat files.
+| | Game | Why it's here |
+|-|------|---------------|
+| 🏆 | **2016 Finals Game 7** | The only 3–1 comeback in Finals history. The Block. The Shot. |
+| 🐍 | **Kobe's Last Game** | 60 points at age 37. The last time the crowd got to say goodbye. |
+| 🏹 | **Warriors Win 73** | A record that had stood 21 years, broken on the final night. |
+| 🎄 | **Christmas 2015 — Warriors vs Cavs** | The rematch nobody could wait for. Curry vs LeBron on the biggest stage. |
+| 🍀 | **2022 Finals Game 6 — Curry 43** | The one thing that had eluded him. He got it in Boston. |
 
-**Signals computed per game:**
+---
 
-- `momentumCurve` — −1.0 (home dominant) to +1.0 (away dominant), driven by scoring runs, FG%, and time pressure
-- `energyCurve` — 0→1 overall game intensity: pace, closeness, scoring bursts, turnover chaos
-- `homeFgPct` / `awayFgPct` — rolling 10-shot field goal % per team, per second
-- `homeFouls` / `awayFouls` — cumulative fouls within each half, reset at halftime
-- `toBurst` — combined turnovers per 60s window, normalized
-- `keyMoments` — scored runs, lead changes, clutch threes, foul trouble triggers, timeouts
+## Four lenses, one dataset
 
-### Frontend
+The modes don't change the data. They change the emotional register you experience it through.
 
-Vanilla JS + Canvas 2D for Minimal / Anime / Broadcast. Three.js (lazy-loaded) for Cosmic. Web Audio API for the generative soundscape. No build step.
+| Mode | Aesthetic | What it emphasizes |
+|------|-----------|--------------------|
+| **Minimal** | Motion graphics | The slow drift of momentum; color as feeling |
+| **Anime** | Sports broadcast energy | Impact, reaction, the visceral moment |
+| **Cosmic** | Astrophysics | Scale, inevitability, two forces in collision |
+| **Broadcast** | Television | Context, stats, the analytical layer |
+
+Same data. Different medium.
 
 ---
 
 ## Setup
 
-### Prerequisites
-
-- Python 3.10+
-- `nba_api` library
+**Requirements:** Python 3.10+, `nba_api`
 
 ```bash
 pip install nba_api
+python scripts/fetch_games.py   # writes data/*.json, ~30s
 ```
 
-### Generate game data
-
-```bash
-cd scripts
-python fetch_games.py
-```
-
-This writes five JSON files to `data/`. Takes ~30 seconds due to rate-limit delays between requests.
-
-### Run
-
-Open `index.html` in a browser. No server needed — works from the filesystem via `file://`, or serve with any static file server:
+Then open `index.html` directly in a browser, or serve locally:
 
 ```bash
 npx serve .
@@ -86,43 +89,28 @@ npx serve .
 python -m http.server 8000
 ```
 
+No build step. No dependencies at runtime.
+
 ---
 
 ## Controls
 
-| Control | Action |
-|---------|--------|
-| Click start screen | Begin playback + initialize audio |
-| Space / play button | Play / pause |
-| Timeline scrub | Jump to any moment |
-| Moment ticks | Hover to preview, click to jump |
-| ½× 1× 2× 4× | Playback speed (full game ≈ 10 min at 4×) |
-| Mode button | Cycle through Minimal → Anime → Cosmic → Broadcast |
-| ← All Games | Return to game selector |
-
----
-
-## Project structure
-
-```
-├── index.html          # Game selector
-├── visualizer.html     # Main experience
-├── data/               # Pre-processed game JSONs
-│   └── *.json
-└── scripts/
-    └── fetch_games.py  # Data pipeline
-```
+| | |
+|-|-|
+| Click to begin | Initializes audio and starts playback |
+| Space / ▶ | Play / pause |
+| Timeline | Scrub to any moment; colored ticks mark key events |
+| ½× 1× 2× 4× | Speed — full game is ~10 min at 4× |
+| Mode button | Cycles Minimal → Anime → Cosmic → Broadcast |
 
 ---
 
 ## Stack
 
-| Layer | Technology |
-|-------|-----------|
-| Data | Python + nba_api |
-| Rendering | Canvas 2D + Three.js (Cosmic mode only) |
-| Audio | Web Audio API |
-| Build | None |
+Data: Python + nba_api → static JSON  
+Rendering: Canvas 2D (Minimal, Anime, Broadcast) + Three.js lazy-loaded (Cosmic)  
+Audio: Web Audio API — no libraries  
+Build: none
 
 ---
 
