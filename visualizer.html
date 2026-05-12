@@ -17,8 +17,11 @@ canvas { display: block; }
   text-align: center;
   pointer-events: none;
   opacity: 0;
-  transition: opacity 0.6s ease;
+  transition: opacity 0.4s ease;
   z-index: 20;
+}
+#moment-overlay.fade-out {
+  transition: opacity 1.2s ease;
 }
 #moment-label { font-size: clamp(11px, 1.8vw, 14px); letter-spacing: 0.35em; text-transform: uppercase; color: rgba(255,255,255,0.45); margin-bottom: 10px; }
 #moment-text  { font-size: clamp(24px, 5vw, 56px); font-weight: 300; letter-spacing: -0.02em; line-height: 1.1; }
@@ -564,7 +567,7 @@ function rgbStr(rgb, alpha) {
 // ─── Renderer system ─────────────────────────────────────────────────────────
 // endSettleT: 0 = normal playback, 1 = fully settled to winner color
 let endSettleT   = 0;
-let currentMode  = 'minimal'; // 'minimal' | 'anime'
+let currentMode  = 'minimal'; // 'minimal' | 'anime' | 'cosmic' | 'broadcast'
 
 // Anime-only state
 let shakeX = 0, shakeY = 0, shakeTtl = 0;    // screen shake
@@ -572,6 +575,59 @@ let flashAlpha  = 0;                           // white flash
 let runGlow     = 0;                           // power-up glow intensity (0→1)
 let chyronTimer = 0;                           // ms remaining for current chyron
 const CHYRON_DURATION = 1800;                  // ms
+
+// ─── Crowd Heat (effectiveEnergy) ────────────────────────────────────────────
+// Crowd Heat adds thresholds, hysteresis, and aftershock decay so energy
+// feels like a crowd, not a smooth curve.
+let _activationState = false;  // true when crowd heat is "fired up"
+let _aftershockPool  = 0.0;    // drains at 0.05/s; compounds on repeated spikes
+let _visualResponse  = 0.0;    // smoothed display energy — rises fast, falls slow
+let _delayBuffer     = 0.0;    // brief hold before visual reacts (anticipation delay)
+let _delayTimer      = 0.0;    // seconds remaining in delay
+
+function updateCrowdHeat(rawEnergy, dt) {
+  const dtSec = dt / 1000;
+
+  // Activation with hysteresis: fires above 0.7, only resets below 0.5
+  if (rawEnergy > 0.7) {
+    _activationState = true;
+    _aftershockPool  = Math.min(_aftershockPool + rawEnergy * 0.3, 1.5);
+    // Hold the incoming spike in a delay buffer for ~0.3s before passing through
+    if (rawEnergy > _delayBuffer) {
+      _delayBuffer = rawEnergy;
+      _delayTimer  = 0.3;
+    }
+  } else if (rawEnergy < 0.5) {
+    _activationState = false;
+  }
+
+  // Drain delay timer; release buffered spike when it expires
+  let feedEnergy = rawEnergy;
+  if (_delayTimer > 0) {
+    _delayTimer -= dtSec;
+    feedEnergy = _delayTimer > 0 ? Math.min(rawEnergy, _delayBuffer * 0.5) : _delayBuffer;
+    if (_delayTimer <= 0) _delayBuffer = 0;
+  }
+
+  // Aftershock drains regardless of activation state
+  _aftershockPool = Math.max(0, _aftershockPool - 0.05 * dtSec);
+
+  const effective = Math.max(feedEnergy, _aftershockPool * 0.6);
+
+  // Visual response: rise fast (τ≈0.3s), fall slow (τ≈4s) — asymmetric recovery
+  const tau = effective > _visualResponse ? 0.3 : 4.0;
+  _visualResponse += (effective - _visualResponse) * (1 - Math.exp(-dtSec / tau));
+
+  return Math.min(1.0, _visualResponse);
+}
+
+function resetCrowdHeat() {
+  _activationState = false;
+  _aftershockPool  = 0;
+  _visualResponse  = 0;
+  _delayBuffer     = 0;
+  _delayTimer      = 0;
+}
 
 function triggerShake(intensity) {
   shakeTtl = Math.round(intensity * 18); // frames
@@ -604,38 +660,98 @@ function hideChyron() {
   chyronTimer = 0;
 }
 
-// Shared: simulate particle physics and return computed visual params
+// ─── State memory ────────────────────────────────────────────────────────────
+let _momentumMemory  = 0.0;  // ~90s lagged momentum
+let _effectiveMomentum = 0.0;
+let _highStakes      = false;
+let _recentClutchCount = 0;
+let _lastClutchT     = -9999;
+
+function updateStateMemory(rawMomentum, dt) {
+  const dtSec = dt / 1000;
+  // Exponential lag — time constant ≈90s at 1x speed, adjusted for playback speed
+  const alpha = 1 - Math.exp(-dtSec * speed / 90);
+  _momentumMemory    += (rawMomentum - _momentumMemory) * alpha;
+  _effectiveMomentum  = rawMomentum * 0.7 + _momentumMemory * 0.3;
+}
+
+function resetStateMemory() {
+  _momentumMemory    = 0;
+  _effectiveMomentum = 0;
+  _highStakes        = false;
+  _recentClutchCount = 0;
+  _lastClutchT       = -9999;
+}
+
+// Called from checkMoments when a clutch/lead-change fires
+function noteClutchMoment() {
+  const now = playheadSec;
+  if (now - _lastClutchT < 180) {  // within 3 game-minutes
+    _recentClutchCount++;
+    if (_recentClutchCount >= 2) _highStakes = true;
+  } else {
+    _recentClutchCount = 1;
+  }
+  _lastClutchT = now;
+}
+
+// ─── Shared simulation ────────────────────────────────────────────────────────
 function simulateAndGetParams(dt) {
-  let momentum = sampleAt(game.momentumCurve, playheadSec);
-  let energy   = sampleAt(game.energyCurve,   playheadSec);
+  let rawMomentum = sampleAt(game.momentumCurve, playheadSec);
+  let rawEnergy   = sampleAt(game.energyCurve,   playheadSec);
+
   if (endSettleT > 0) {
     const winnerMomentum = game.finalScore.away > game.finalScore.home ? 1 : -1;
-    momentum = momentum + (winnerMomentum - momentum) * endSettleT;
-    energy   = energy   * (1 - endSettleT * 0.6);
+    rawMomentum = rawMomentum + (winnerMomentum - rawMomentum) * endSettleT;
+    rawEnergy   = rawEnergy   * (1 - endSettleT * 0.6);
   }
+
+  // State memory — updates _effectiveMomentum
+  updateStateMemory(rawMomentum, dt);
+  const momentum = _effectiveMomentum;
+
+  // Crowd Heat — effectiveEnergy with aftershock + hysteresis
+  const energy = updateCrowdHeat(rawEnergy, dt);
+
+  // highStakes adds a subtle persistent energy floor
+  const baselineEnergy = _highStakes ? Math.max(energy, 0.35) : energy;
 
   const homeRgb  = hexToRgb(game.homeColor);
   const awayRgb  = hexToRgb(game.awayColor);
   const homeRgb2 = hexToRgb(game.homeColorSecondary);
   const awayRgb2 = hexToRgb(game.awayColorSecondary);
-  const t       = (momentum + 1) / 2;
+  const t         = (momentum + 1) / 2;
   const primary   = lerpColor(homeRgb,  awayRgb,  t);
   const secondary = lerpColor(homeRgb2, awayRgb2, t);
 
-  const activeCount = Math.round(150 + energy * 850);
-  const maxSpeed    = 1.5 + energy * 4;
-  const driftX      = momentum * 0.6;
+  // Gravity: direction shifts toward the leading team's side of the canvas
+  // momentum > 0 → away team leads → pull rightward; < 0 → home → leftward
+  const gravX = momentum * 0.8;  // physics constant, not a UI scale
+  const gravY = 0;
+
+  // Dead space: at true low energy, drop to 80 particles so the canvas can breathe
+  const deadSpaceFloor = 80;
+  // Rare overload: when aftershock is saturated (>1.2) briefly allow up to 1800 particles
+  const overloadCap = _aftershockPool > 1.2 ? 1800 : 1000;
+  const activeCount = Math.min(overloadCap, Math.max(deadSpaceFloor, Math.round(150 + baselineEnergy * 850)));
+  const maxSpeed    = 1.5 + baselineEnergy * 4;
 
   for (let i = 0; i < POOL_SIZE; i++) {
     const p = pool[i];
-    const maxTrail = currentMode === 'anime' ? Math.round(6 + energy * 22) : Math.round(2 + energy * 6);
+    const maxTrail = currentMode === 'anime' ? Math.round(6 + baselineEnergy * 22) : Math.round(2 + baselineEnergy * 6);
     if (i >= activeCount) { p.trail = []; continue; }
 
     p.trail.push({ x: p.x, y: p.y });
     if (p.trail.length > maxTrail) p.trail.shift();
 
-    p.vx += driftX * 0.04 + (Math.random() - 0.5) * 0.25 * energy;
-    p.vy +=                  (Math.random() - 0.5) * 0.25 * energy;
+    // Inertia: particles on the trailing team's half are heavier (damped more)
+    const pSide = p.x < W / 2 ? -1 : 1;  // -1=home side, +1=away side
+    const isTrailing = (momentum > 0 && pSide < 0) || (momentum < 0 && pSide > 0);
+    const damping = isTrailing ? 0.97 : 1.0;  // trailing side drags
+
+    p.vx = p.vx * damping + gravX * 0.04 + (Math.random() - 0.5) * 0.25 * baselineEnergy;
+    p.vy = p.vy * damping + gravY * 0.04 + (Math.random() - 0.5) * 0.25 * baselineEnergy;
+    // Soft centering force
     p.vx += (W / 2 - p.x) * 0.0003;
     p.vy += (H / 2 - p.y) * 0.0003;
 
@@ -652,12 +768,52 @@ function simulateAndGetParams(dt) {
     if (p.y > H+20) p.y = -20;
   }
 
-  return { momentum, energy, primary, secondary, activeCount };
+  return { momentum, energy: baselineEnergy, rawEnergy, primary, secondary, activeCount };
+}
+
+// ─── Per-mode signal shaping ─────────────────────────────────────────────────
+// Each mode bends the raw signals differently before passing to its renderer.
+
+// Minimal: slow response (τ≈2s rise), long decay (τ≈6s fall)
+let _minEnvEnergy = 0, _minEnvMomentum = 0;
+function shapeMinimal(energy, momentum, dt) {
+  const dtSec = dt / 1000;
+  const eRise = 1 - Math.exp(-dtSec / 2.0);
+  const eFall = 1 - Math.exp(-dtSec / 6.0);
+  const eTau  = energy > _minEnvEnergy ? eRise : eFall;
+  _minEnvEnergy   += (energy   - _minEnvEnergy)   * eTau;
+  _minEnvMomentum += (momentum - _minEnvMomentum) * (1 - Math.exp(-dtSec / 3.0));
+  return { energy: _minEnvEnergy, momentum: _minEnvMomentum };
+}
+
+// Anime: exaggerated spikes — energy^0.6 compresses low end, stretches highs
+let _animeFreeze = 0;  // frames remaining in frame-freeze
+function shapeAnime(energy, momentum, dt) {
+  const e = Math.pow(Math.max(0, energy), 0.6);
+  return { energy: e, momentum };
+}
+
+// Cosmic: uses raw signals — mode diverges through shader uniforms, not here
+
+// Broadcast: discrete updates — energy/momentum only move on scoring events
+let _bcDiscreteEnergy = 0, _bcDiscreteMomentum = 0, _bcLastEventT = -1;
+function shapeBroadcast(energy, momentum) {
+  // Snap to actual values only when a new event has just fired
+  if (_scoreIdx !== _bcLastEventT) {
+    _bcDiscreteEnergy   = energy;
+    _bcDiscreteMomentum = momentum;
+    _bcLastEventT       = _scoreIdx;
+  }
+  return { energy: _bcDiscreteEnergy, momentum: _bcDiscreteMomentum };
 }
 
 // ─── Minimalist renderer ──────────────────────────────────────────────────────
 function drawMinimal(dt) {
-  const { energy, primary, secondary, activeCount } = simulateAndGetParams(dt);
+  const raw = simulateAndGetParams(dt);
+  // Minimal: slow-response shaped energy for all drawing — physics already ran with real values
+  const shaped  = shapeMinimal(raw.energy, raw.momentum, dt);
+  const { primary, secondary, activeCount } = raw;
+  const energy  = shaped.energy;
 
   ctx.fillStyle = `rgba(0,0,0,${0.18 - energy * 0.05})`;
   ctx.fillRect(0, 0, W, H);
@@ -671,9 +827,13 @@ function drawMinimal(dt) {
     ctx.fillRect(0, 0, W, H);
   }
 
+  const maxSpecial = Math.floor(activeCount * 0.05);
+  let specialDrawn = 0;
+
   for (let i = 0; i < activeCount; i++) {
     const p     = pool[i];
-    const alpha = (0.25 + energy * 0.55) * (0.6 + 0.4 * Math.sin(p.life * Math.PI * 2));
+    // Background particles: alpha hard-capped at 0.35 so they never compete with foreground
+    const alpha = Math.min(0.35, (0.25 + energy * 0.55) * (0.6 + 0.4 * Math.sin(p.life * Math.PI * 2)));
 
     if (p.trail.length > 1) {
       ctx.beginPath();
@@ -684,14 +844,22 @@ function drawMinimal(dt) {
       ctx.stroke();
     }
 
-    if (p.special && energy > 0.4) {
+    // Special glow: cap at 5% of active count for visual scarcity
+    if (p.special && energy > 0.4 && specialDrawn < maxSpecial) {
+      specialDrawn++;
       const gr = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, p.radius * 9);
-      gr.addColorStop(0, rgbStr(primary, alpha * 0.4));
+      gr.addColorStop(0, rgbStr(primary, 0.4));
       gr.addColorStop(1, 'rgba(0,0,0,0)');
       ctx.beginPath();
       ctx.arc(p.x, p.y, p.radius * 9, 0, Math.PI * 2);
       ctx.fillStyle = gr;
       ctx.fill();
+      // Foreground dot gets full alpha — dominant signal
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, p.radius * (1 + energy * 0.4), 0, Math.PI * 2);
+      ctx.fillStyle = rgbStr(primary, 0.8);
+      ctx.fill();
+      continue;
     }
 
     ctx.beginPath();
@@ -703,7 +871,14 @@ function drawMinimal(dt) {
 
 // ─── Anime renderer ───────────────────────────────────────────────────────────
 function drawAnime(dt) {
-  const { energy, momentum, primary, secondary, activeCount } = simulateAndGetParams(dt);
+  // Frame-freeze: skip physics+draw for a few frames on big hits, then burst
+  if (_animeFreeze > 0) { _animeFreeze--; return; }
+
+  const raw    = simulateAndGetParams(dt);
+  const shaped = shapeAnime(raw.energy, raw.momentum, dt);
+  const { primary, secondary, activeCount } = raw;
+  const energy   = shaped.energy;
+  const momentum = shaped.momentum;
 
   // Advance shake
   if (shakeTtl > 0) {
@@ -862,14 +1037,19 @@ function checkMoments() {
         if (currentMode === 'minimal') {
           document.getElementById('moment-label').textContent = clockString(km.t);
           document.getElementById('moment-text').textContent  = humanLabel(km);
+          overlay.classList.remove('fade-out');
           overlay.style.opacity = 1;
         }
+        if (km.type === 'clutch_shot' || km.type === 'lead_change') noteClutchMoment();
         fireMomentAudio(km);
       }
       return;
     }
   }
-  if (lastMomentIdx !== -1) { if (currentMode === 'minimal') overlay.style.opacity = 0; lastMomentIdx = -1; }
+  if (lastMomentIdx !== -1) {
+    if (currentMode === 'minimal') { overlay.classList.add('fade-out'); overlay.style.opacity = 0; }
+    lastMomentIdx = -1;
+  }
 }
 
 // ─── End card ─────────────────────────────────────────────────────────────────
@@ -922,58 +1102,98 @@ function buildTimeline() {
 }
 
 // ─── Audio ────────────────────────────────────────────────────────────────────
-// Shared nodes (set by initAudio)
-let _master, _conv, _drones, _heartbeat, _heartGain, _duck;
-let _lastDroneModT = 0; // throttle lead-change modulation
+// Four independent layers: ambient, momentum-tonality, chaos, clutch.
+let _master, _conv, _duck;
+let _drones;                    // ambient layer oscillators
+let _heartbeat, _heartGain;     // clutch layer heartbeat
+let _chaosGain, _chaosNoise;    // chaos layer
+let _clutchComp;                // clutch compressor (inserted when final 4 min)
+let _compActive = false;
+let _lastDroneModT = 0;
+
+// Minor/major/suspended voicings (cent offsets per drone) keyed by tonality
+const TONALITY = {
+  minor:     [ -14,  10, -14,  10],   // home dominant — darker
+  suspended: [   0,   0,   0,   0],   // tied
+  major:     [  14, -10,  14, -10],   // away dominant — brighter
+};
 
 function initAudio() {
   audioCtx = new (window.AudioContext || window.webkitAudioContext)();
 
-  // Master gain → destination
+  // ── Shared reverb ───────────────────────────────────────────────
+  _conv = audioCtx.createConvolver();
+  const convGain = audioCtx.createGain();
+  convGain.gain.value = 0.3;
+  const rate = audioCtx.sampleRate;
+  const irBuf = audioCtx.createBuffer(2, rate * 2.5, rate);
+  for (let ch = 0; ch < 2; ch++) {
+    const d = irBuf.getChannelData(ch);
+    for (let i = 0; i < d.length; i++) d[i] = (Math.random()*2-1) * Math.pow(1-i/d.length, 3);
+  }
+  _conv.buffer = irBuf;
+
+  // ── Master → destination ────────────────────────────────────────
   _master = audioCtx.createGain();
   _master.gain.value = 0;
+  _conv.connect(convGain); convGain.connect(_master);
   _master.connect(audioCtx.destination);
-  _master.gain.linearRampToValueAtTime(0.3, audioCtx.currentTime + 2);
+  _master.gain.linearRampToValueAtTime(0.28, audioCtx.currentTime + 2);
 
-  // Duck gain (for timeouts) — sits between drones and master
+  // ── Duck (timeouts) ─────────────────────────────────────────────
   _duck = audioCtx.createGain();
   _duck.gain.value = 1;
   _duck.connect(_master);
 
-  // Reverb convolver
-  _conv = audioCtx.createConvolver();
-  const convGain = audioCtx.createGain();
-  convGain.gain.value = 0.35;
-  _conv.connect(convGain); convGain.connect(_master);
-  const rate = audioCtx.sampleRate;
-  const buf  = audioCtx.createBuffer(2, rate * 2.5, rate);
-  for (let ch = 0; ch < 2; ch++) {
-    const d = buf.getChannelData(ch);
-    for (let i = 0; i < d.length; i++) d[i] = (Math.random()*2-1) * Math.pow(1-i/d.length, 3);
-  }
-  _conv.buffer = buf;
-
-  // 4 drone oscillators (sine/triangle, bass→mid)
+  // ── Layer 1: Ambient drones (always present) ────────────────────
+  // Four sine/triangle oscillators, bass → mid. Constant floor, never silent.
   _drones = [55, 82.4, 110, 164.8].map((f, i) => {
     const osc  = audioCtx.createOscillator();
     const gain = audioCtx.createGain();
     const filt = audioCtx.createBiquadFilter();
     osc.type = i % 2 === 0 ? 'sine' : 'triangle';
     osc.frequency.value = f;
-    filt.type = 'lowpass'; filt.frequency.value = 500;
-    gain.gain.value = 0.05 - i * 0.01;
+    filt.type = 'lowpass'; filt.frequency.value = 400;
+    gain.gain.value = 0.04 - i * 0.008;
     osc.connect(filt); filt.connect(gain);
     gain.connect(_duck); gain.connect(_conv);
     osc.start();
-    return { osc, gain, filt };
+    return { osc, gain, filt, baseFreq: f };
   });
 
-  // Heartbeat oscillator — silent until final 2 min
+  // ── Layer 2: Momentum tonality lives in updateAudio (detune scheduling) ──
+
+  // ── Layer 3: Chaos layer (turnover bursts) ───────────────────────
+  // Filtered noise gated by toBurst — sounds like static, adds rhythm complexity
+  const noiseLen = audioCtx.sampleRate * 2;
+  const noiseBuf = audioCtx.createBuffer(1, noiseLen, audioCtx.sampleRate);
+  const nd = noiseBuf.getChannelData(0);
+  for (let i = 0; i < noiseLen; i++) nd[i] = Math.random() * 2 - 1;
+  _chaosNoise = audioCtx.createBufferSource();
+  _chaosNoise.buffer = noiseBuf;
+  _chaosNoise.loop = true;
+  const chaosFilt = audioCtx.createBiquadFilter();
+  chaosFilt.type = 'bandpass'; chaosFilt.frequency.value = 200; chaosFilt.Q.value = 3;
+  _chaosGain = audioCtx.createGain();
+  _chaosGain.gain.value = 0;
+  _chaosNoise.connect(chaosFilt); chaosFilt.connect(_chaosGain); _chaosGain.connect(_duck);
+  _chaosNoise.start();
+
+  // ── Layer 4: Clutch compressor (final 4 min) ─────────────────────
+  // Inserted between duck and master when clutch time begins.
+  // Makes everything quieter but more present — pressure you feel, not hear.
+  _clutchComp = audioCtx.createDynamicsCompressor();
+  _clutchComp.threshold.value = -18;
+  _clutchComp.knee.value = 6;
+  _clutchComp.ratio.value = 6;
+  _clutchComp.attack.value = 0.08;
+  _clutchComp.release.value = 0.6;
+
+  // ── Heartbeat (clutch layer) ─────────────────────────────────────
   const hOsc  = audioCtx.createOscillator();
   _heartGain  = audioCtx.createGain();
   const hFilt = audioCtx.createBiquadFilter();
-  hOsc.type = 'sine';
-  hOsc.frequency.value = 50;
+  hOsc.type = 'sine'; hOsc.frequency.value = 50;
   hFilt.type = 'lowpass'; hFilt.frequency.value = 80;
   _heartGain.gain.value = 0;
   hOsc.connect(hFilt); hFilt.connect(_heartGain); _heartGain.connect(_master);
@@ -1122,6 +1342,12 @@ function fireMomentAudio(km) {
       triggerFlash(0.35);
       triggerShake(0.4);
       showChyron('Lead Change', '#3399ff');
+    } else if (km.type === 'clutch_shot') {
+      // Frame-freeze: 4 frames of stillness, then burst
+      _animeFreeze = 4;
+      triggerFlash(0.6 + km.intensity * 0.4);
+      triggerShake(0.8 + km.intensity * 0.5);
+      showChyron('Three!', '#ffaa00');
     } else if (km.type === 'timeout') {
       showChyron('Timeout', '#666');
     }
@@ -1143,27 +1369,50 @@ function updateAudio() {
   const now      = audioCtx.currentTime;
   const energy   = sampleAt(game.energyCurve,  playheadSec);
   const momentum = sampleAt(game.momentumCurve, playheadSec);
+  const toBurst  = game.toBurst ? sampleAt(game.toBurst, playheadSec) : 0;
+  const timeLeft = gameDuration() - playheadSec;
 
-  // Master volume
-  _master.gain.linearRampToValueAtTime(playing ? 0.15 + energy * 0.35 : 0, now + 0.5);
+  // ── Master volume ───────────────────────────────────────────────
+  _master.gain.linearRampToValueAtTime(playing ? 0.15 + energy * 0.3 : 0, now + 0.5);
 
-  // Filter cutoff follows energy; detune follows momentum tightness
-  const tight = 1 - Math.abs(momentum); // peaks when 50-50
+  // ── Layer 1: Ambient — filter opens with energy, always audible ─
   _drones.forEach((d, i) => {
-    d.filt.frequency.linearRampToValueAtTime(150 + energy * 1100 + i * 80, now + 1);
-    // Dissonance when tight game; resolve when one team dominates
-    const detune = tight > 0.6 ? (i % 2 === 0 ? -12 : 10) : 0;
-    d.osc.detune.linearRampToValueAtTime(detune, now + 3);
+    d.filt.frequency.linearRampToValueAtTime(120 + energy * 900 + i * 60, now + 1);
   });
 
-  // Heartbeat: activate in final 2 min (game-sec > duration - 240)
-  const timeLeft = gameDuration() - playheadSec;
-  if (timeLeft < 240 && playing) {
-    // BPM 60 → 90 as time runs out
+  // ── Layer 2: Momentum tonality — chord voicing shifts ──────────
+  // home dominant → minor (darker); tied → suspended; away → major
+  const tonality = momentum < -0.2 ? 'minor' : momentum > 0.2 ? 'major' : 'suspended';
+  const targetCents = TONALITY[tonality];
+  _drones.forEach((d, i) => {
+    d.osc.detune.linearRampToValueAtTime(targetCents[i], now + 3);
+  });
+
+  // ── Layer 3: Chaos — turnover burst gates noise ─────────────────
+  if (_chaosGain) {
+    const chaosVol = toBurst > 0.3 ? (toBurst - 0.3) / 0.7 * 0.06 : 0;
+    _chaosGain.gain.linearRampToValueAtTime(playing ? chaosVol : 0, now + 0.2);
+  }
+
+  // ── Layer 4: Clutch — insert compressor + heartbeat in final 4 min ─
+  const clutchActive = timeLeft < 240 && playing;
+  if (clutchActive && !_compActive) {
+    // Route duck → compressor → master
+    _duck.disconnect(_master);
+    _duck.connect(_clutchComp);
+    _clutchComp.connect(_master);
+    _compActive = true;
+  } else if (!clutchActive && _compActive) {
+    _duck.disconnect(_clutchComp);
+    _clutchComp.disconnect(_master);
+    _duck.connect(_master);
+    _compActive = false;
+  }
+
+  if (clutchActive) {
     const bpm      = 60 + (1 - timeLeft / 240) * 30;
     const interval = 60 / bpm;
-    const beatPhase = (audioCtx.currentTime % interval) / interval;
-    // Pulse the heartbeat gain once per beat
+    const beatPhase = (now % interval) / interval;
     const vol = 0.08 + energy * 0.12;
     if (beatPhase < 0.05) {
       _heartGain.gain.cancelScheduledValues(now);
@@ -1209,6 +1458,11 @@ function seek(sec) {
   eventIdx = 0;
   _scoreIdx = 0; _scoreH = 0; _scoreA = 0;
   _bcRunTeam = null; _bcRunPts = 0;
+  resetCrowdHeat();
+  resetStateMemory();
+  _minEnvEnergy = 0; _minEnvMomentum = 0;
+  _animeFreeze  = 0;
+  _bcDiscreteEnergy = 0; _bcDiscreteMomentum = 0; _bcLastEventT = -1;
   if (game) {
     while (eventIdx < game.events.length && game.events[eventIdx].t <= sec) eventIdx++;
     advanceScore(sec);
@@ -1569,7 +1823,14 @@ let _bcRecapTimer = 0;   // ms remaining for quarter-end recap card
 let _bcLastPeriod = 1;
 
 function drawBroadcast(dt) {
-  const { energy, primary, secondary, activeCount } = simulateAndGetParams(dt);
+  const raw    = simulateAndGetParams(dt);
+  // Broadcast: discrete updates — visuals only shift on scoring events, not every frame
+  const shaped = shapeBroadcast(raw.energy, raw.momentum);
+  const { primary, secondary, activeCount } = raw;
+  const energy = shaped.energy;
+
+  // Reduced particle density (50% of normal) — data layer is the visual here
+  const bcCount = Math.floor(activeCount * 0.5);
 
   // Slightly lighter trail fade than minimal so background stays legible
   ctx.fillStyle = `rgba(8,12,28,${0.22 - energy * 0.06})`;
@@ -1585,8 +1846,8 @@ function drawBroadcast(dt) {
     ctx.fillRect(0, 0, W, H);
   }
 
-  // Particles — same as minimal but slightly smaller
-  for (let i = 0; i < activeCount; i++) {
+  // Particles — 50% count, subdued; data layer is the dominant visual
+  for (let i = 0; i < bcCount; i++) {
     const p     = pool[i];
     const alpha = (0.2 + energy * 0.45) * (0.6 + 0.4 * Math.sin(p.life * Math.PI * 2));
     if (p.trail.length > 1) {

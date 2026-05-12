@@ -345,7 +345,42 @@ def compute_momentum(events: list[dict], game_duration: float) -> dict:
     }
 
 
+def contextual_importance(t: float, game_duration: float, score_diff: int,
+                          energy: list[float], recent_moments: list[float],
+                          base_intensity: float) -> float:
+    """Score how editorially significant a moment is given its context."""
+    s = min(int(t), len(energy) - 1)
+
+    # Closeness: exponential — within 5 pts = 2x, within 2 pts = 4x
+    if score_diff <= 2:
+        closeness = 4.0
+    elif score_diff <= 5:
+        closeness = 2.0
+    elif score_diff <= 10:
+        closeness = 1.2
+    else:
+        closeness = 0.6  # blowout — suppress most moments
+
+    # Time pressure: final 4 min = 3x, final 1 min = 6x
+    time_left = game_duration - t
+    if time_left < 60:
+        time_factor = 6.0
+    elif time_left < 240:
+        time_factor = 3.0
+    elif time_left < 480:
+        time_factor = 1.5
+    else:
+        time_factor = 1.0
+
+    # Sequence factor: 3+ moments in last 3 game-minutes compounds
+    recent_window = [rt for rt in recent_moments if t - rt < 180]
+    sequence = 1.0 + len(recent_window) * 0.4
+
+    return base_intensity * closeness * time_factor * sequence
+
+
 def detect_key_moments(events: list[dict], momentum: list[float], energy: list[float], curves: dict | None = None) -> list[dict]:
+    game_duration = len(energy) - 1.0
     moments = []
     last_lead = "tied"
     home_run = 0
@@ -353,82 +388,124 @@ def detect_key_moments(events: list[dict], momentum: list[float], energy: list[f
     last_scorer = None
     run_start_t = 0.0
     last_home, last_away = 0, 0
+    recent_moment_times: list[float] = []  # timestamps of recently emitted moments
+
+    # Blowout threshold: suppress low-value moments when margin > 15
+    BLOWOUT = 15
+    # Minimum importance score to emit a moment
+    THRESHOLDS = {
+        "run_start":   1.0,
+        "lead_change": 1.2,
+        "clutch_shot": 1.5,
+        "timeout":     1.8,  # timeouts are only editorial when game is close and late
+        "foul_trouble": 0.8,
+    }
 
     for e in events:
+        hs = e.get("homeScore", last_home)
+        aws = e.get("awayScore", last_away)
+        if hs: last_home = hs
+        if aws: last_away = aws
+        diff = abs((hs or last_home) - (aws or last_away))
+
         if e["type"] == "timeout":
             s = min(int(e["t"]), len(energy) - 1)
-            if energy[s] > 0.5:
-                moments.append({"t": e["t"], "label": "Timeout", "type": "timeout", "intensity": round(energy[s], 3)})
+            importance = contextual_importance(
+                e["t"], game_duration, diff, energy, recent_moment_times, energy[s])
+            if importance >= THRESHOLDS["timeout"]:
+                moments.append({"t": e["t"], "label": "Timeout", "type": "timeout",
+                                 "intensity": round(min(1.0, importance / 5.0), 3)})
+                recent_moment_times.append(e["t"])
             continue
 
         if e["type"] not in ("score", "free_throw"):
             continue
 
-        hs, aws = e["homeScore"], e["awayScore"]
-        if hs == 0 and aws == 0:
+        hs2, aws2 = e["homeScore"], e["awayScore"]
+        if hs2 == 0 and aws2 == 0:
             continue
 
         scorer = e["team"]
-        delta = e["scoreDelta"]
+        delta  = e["scoreDelta"]
 
         # Scoring run tracking
         if scorer == last_scorer:
-            if scorer == "home":
-                home_run += delta
-            elif scorer == "away":
-                away_run += delta
+            if scorer == "home":   home_run += delta
+            elif scorer == "away": away_run += delta
         else:
             run_pts = home_run if last_scorer == "home" else away_run
             if run_pts >= 8 and last_scorer in ("home", "away"):
-                team_label = e.get("teamTricode") or last_scorer.capitalize()
-                moments.append({
-                    "t": run_start_t,
-                    "label": f"{run_pts}-0 run",
-                    "type": "run_start",
-                    "intensity": round(min(1.0, run_pts / 15.0), 3),
-                })
-            home_run = delta if scorer == "home" else 0
-            away_run = delta if scorer == "away" else 0
+                base = min(1.0, run_pts / 15.0)
+                importance = contextual_importance(
+                    run_start_t, game_duration, diff, energy, recent_moment_times, base)
+                if importance >= THRESHOLDS["run_start"]:
+                    moments.append({
+                        "t":         run_start_t,
+                        "label":     f"{run_pts}-0 run",
+                        "type":      "run_start",
+                        "intensity": round(min(1.0, importance / 6.0), 3),
+                    })
+                    recent_moment_times.append(run_start_t)
+            home_run    = delta if scorer == "home" else 0
+            away_run    = delta if scorer == "away" else 0
             run_start_t = e["t"]
             last_scorer = scorer
 
-        # Lead change
-        new_lead = "tied" if hs == aws else ("home" if hs > aws else "away")
+        # Lead change — only when game is genuinely competitive
+        new_lead = "tied" if hs2 == aws2 else ("home" if hs2 > aws2 else "away")
         if new_lead != last_lead and new_lead != "tied" and last_lead != "tied":
-            moments.append({
-                "t": e["t"],
-                "label": f"Lead change  {hs}-{aws}",
-                "type": "lead_change",
-                "intensity": 0.7,
-            })
-        last_lead = new_lead
-        last_home, last_away = hs, aws
+            importance = contextual_importance(
+                e["t"], game_duration, diff, energy, recent_moment_times, 0.7)
+            if importance >= THRESHOLDS["lead_change"]:
+                moments.append({
+                    "t":         e["t"],
+                    "label":     f"Lead change  {hs2}-{aws2}",
+                    "type":      "lead_change",
+                    "intensity": round(min(1.0, importance / 8.0), 3),
+                })
+                recent_moment_times.append(e["t"])
+        last_lead  = new_lead
+        last_home  = hs2
+        last_away  = aws2
 
-        # Clutch 3 in high-energy moment
+        # Clutch shot: 3-pointer in close, high-energy moments
         s = min(int(e["t"]), len(energy) - 1)
-        if delta == 3 and energy[s] > 0.65:
-            moments.append({
-                "t": e["t"],
-                "label": "Three!",
-                "type": "clutch_shot",
-                "intensity": round(energy[s], 3),
-            })
+        if delta == 3 and energy[s] > 0.55:
+            importance = contextual_importance(
+                e["t"], game_duration, diff, energy, recent_moment_times, energy[s])
+            if importance >= THRESHOLDS["clutch_shot"]:
+                moments.append({
+                    "t":         e["t"],
+                    "label":     "Three!",
+                    "type":      "clutch_shot",
+                    "intensity": round(min(1.0, importance / 8.0), 3),
+                })
+                recent_moment_times.append(e["t"])
 
-    # Foul trouble: flag when a team hits 4+ fouls in a half (using curves if available)
+    # Foul trouble — only when game is close (diff < BLOWOUT)
     if curves:
         home_fouls = curves.get("homeFouls", [])
         away_fouls = curves.get("awayFouls", [])
-        home_trouble_fired = set()  # which half (1 or 2) already fired
-        away_trouble_fired = set()
+        home_trouble_fired: set[int] = set()
+        away_trouble_fired: set[int] = set()
         for s, (hf, af) in enumerate(zip(home_fouls, away_fouls)):
-            t = float(s)
-            half = 1 if t < 1440 else 2
-            if hf >= 4 and half not in home_trouble_fired:
+            t_val = float(s)
+            half  = 1 if t_val < 1440 else 2
+            score_gap = abs(last_home - last_away)
+            if hf >= 4 and half not in home_trouble_fired and score_gap < BLOWOUT:
                 home_trouble_fired.add(half)
-                moments.append({"t": t, "label": "Foul Trouble", "type": "foul_trouble", "team": "home", "intensity": min(1.0, hf / 6.0)})
-            if af >= 4 and half not in away_trouble_fired:
+                importance = contextual_importance(
+                    t_val, game_duration, score_gap, energy, recent_moment_times, hf / 6.0)
+                if importance >= THRESHOLDS["foul_trouble"]:
+                    moments.append({"t": t_val, "label": "Foul Trouble", "type": "foul_trouble",
+                                    "team": "home", "intensity": round(min(1.0, hf / 6.0), 3)})
+            if af >= 4 and half not in away_trouble_fired and score_gap < BLOWOUT:
                 away_trouble_fired.add(half)
-                moments.append({"t": t, "label": "Foul Trouble", "type": "foul_trouble", "team": "away", "intensity": min(1.0, af / 6.0)})
+                importance = contextual_importance(
+                    t_val, game_duration, score_gap, energy, recent_moment_times, af / 6.0)
+                if importance >= THRESHOLDS["foul_trouble"]:
+                    moments.append({"t": t_val, "label": "Foul Trouble", "type": "foul_trouble",
+                                    "team": "away", "intensity": round(min(1.0, af / 6.0), 3)})
 
     # Deduplicate: no two moments within 20 seconds
     moments.sort(key=lambda m: m["t"])
