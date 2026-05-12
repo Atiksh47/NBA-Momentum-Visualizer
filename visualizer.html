@@ -159,7 +159,15 @@ canvas { display: block; }
   flex-shrink: 0;
 }
 #mode-btn:hover { color: #fff; border-color: rgba(255,255,255,0.5); }
-#mode-btn.anime { color: #ff4466; border-color: rgba(255,68,102,0.5); }
+#mode-btn.anime  { color: #ff4466; border-color: rgba(255,68,102,0.5); }
+#mode-btn.cosmic { color: #88aaff; border-color: rgba(136,170,255,0.5); }
+
+#cosmic-c {
+  display: none;
+  position: fixed; inset: 0;
+  width: 100%; height: 100%;
+  z-index: 1;
+}
 
 /* ── Anime chyron overlay ── */
 #chyron {
@@ -237,6 +245,7 @@ canvas { display: block; }
 </div>
 
 <canvas id="c"></canvas>
+<canvas id="cosmic-c"></canvas>
 
 <a id="back-btn" href="index.html">← All Games</a>
 
@@ -634,8 +643,9 @@ function drawAnime(dt) {
 
 function renderFrame(dt) {
   if (!game) return;
-  if (currentMode === 'anime') drawAnime(dt);
-  else                         drawMinimal(dt);
+  if (currentMode === 'anime')  drawAnime(dt);
+  else if (currentMode === 'cosmic') drawCosmic(dt);
+  else                          drawMinimal(dt);
 }
 
 // ─── Score UI ─────────────────────────────────────────────────────────────────
@@ -897,9 +907,13 @@ function fireEventAudio(evt) {
       triggerShake(0.4 + energy * 0.5);
       triggerFlash(0.3 + energy * 0.3);
     }
+    if (currentMode === 'cosmic' && evt.scoreDelta >= 3) {
+      triggerCosmicWave(0.4 + energy * 0.5);
+    }
   } else if (evt.type === 'turnover') {
     if (audioCtx && playing) fireTransient(0.05 + energy * 0.06);
     if (currentMode === 'anime') { triggerShake(0.3); triggerFlash(0.15); }
+    if (currentMode === 'cosmic') triggerCosmicWave(0.25);
   } else if (evt.type === 'timeout') {
     if (audioCtx && playing && _duck) {
       const now = audioCtx.currentTime;
@@ -938,6 +952,16 @@ function fireMomentAudio(km) {
       showChyron('Lead Change', '#3399ff');
     } else if (km.type === 'timeout') {
       showChyron('Timeout', '#666');
+    }
+  }
+
+  // Cosmic visual effects for key moments
+  if (currentMode === 'cosmic') {
+    if (km.type === 'run_start') {
+      triggerCosmicWave(0.6 + km.intensity * 0.6);
+    } else if (km.type === 'lead_change') {
+      triggerCosmicSwap();
+      triggerCosmicWave(0.4);
     }
   }
 }
@@ -1043,21 +1067,360 @@ document.querySelectorAll('.speed-btn').forEach(btn => {
   });
 });
 
-// ─── Mode toggle ──────────────────────────────────────────────────────────────
-const modeBtn = document.getElementById('mode-btn');
-modeBtn.addEventListener('click', () => {
-  currentMode = currentMode === 'minimal' ? 'anime' : 'minimal';
-  const isAnime = currentMode === 'anime';
-  modeBtn.textContent = isAnime ? 'Anime' : 'Minimal';
-  modeBtn.classList.toggle('anime', isAnime);
-  // Reset anime transient state on switch
-  if (!isAnime) {
-    shakeX = 0; shakeY = 0; shakeTtl = 0;
-    flashAlpha = 0; runGlow = 0;
-    hideChyron();
+// ─── Cosmic renderer (Three.js, lazy-loaded) ─────────────────────────────────
+let _three = null;      // { THREE, scene, camera, renderer, composer, ... }
+let _cosmicLoading = false;
+let _cosmicWave  = 0;   // gravitational wave amplitude 0→1
+let _cosmicSwap  = 0;   // lead-change swap progress 0→1 (drives attractor interpolation)
+let _cosmicSwapDir = 1; // which way attractors swap
+let _camOrbitAngle = 0; // radians, increments each frame
+
+// Inject Three.js CDN module — returns promise resolving to { THREE, addons }
+function loadThree() {
+  return new Promise((resolve, reject) => {
+    const s = document.createElement('script');
+    s.type = 'importmap';
+    s.textContent = JSON.stringify({
+      imports: {
+        'three':                 'https://cdn.jsdelivr.net/npm/three@0.165.0/build/three.module.js',
+        'three/addons/':         'https://cdn.jsdelivr.net/npm/three@0.165.0/examples/jsm/',
+      }
+    });
+    document.head.appendChild(s);
+
+    const m = document.createElement('script');
+    m.type = 'module';
+    m.textContent = `
+      import * as THREE from 'three';
+      import { EffectComposer }  from 'three/addons/postprocessing/EffectComposer.js';
+      import { RenderPass }      from 'three/addons/postprocessing/RenderPass.js';
+      import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+      import { ShaderPass }      from 'three/addons/postprocessing/ShaderPass.js';
+      window.__threeReady({ THREE, EffectComposer, RenderPass, UnrealBloomPass, ShaderPass });
+    `;
+    window.__threeReady = (libs) => { delete window.__threeReady; resolve(libs); };
+    m.onerror = reject;
+    document.head.appendChild(m);
+  });
+}
+
+async function initCosmic() {
+  if (_three) return; // already initialised
+  if (_cosmicLoading) return;
+  _cosmicLoading = true;
+
+  const { THREE, EffectComposer, RenderPass, UnrealBloomPass, ShaderPass } = await loadThree();
+
+  const cosmicCanvas = document.getElementById('cosmic-c');
+  const renderer = new THREE.WebGLRenderer({ canvas: cosmicCanvas, antialias: false, alpha: false });
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5));
+  renderer.setSize(window.innerWidth, window.innerHeight);
+
+  const scene  = new THREE.Scene();
+  const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 2000);
+  camera.position.set(0, 0, 280);
+
+  // ── Star field geometry ─────────────────────────────────────────
+  const STAR_COUNT = 3000;
+  const positions  = new Float32Array(STAR_COUNT * 3);
+  const basePos    = new Float32Array(STAR_COUNT * 3); // rest positions
+  const teamSide   = new Float32Array(STAR_COUNT);     // -1 = home, +1 = away
+  const starSizes  = new Float32Array(STAR_COUNT);
+
+  for (let i = 0; i < STAR_COUNT; i++) {
+    // Each star assigned to home (left) or away (right) nebula
+    const side  = i < STAR_COUNT / 2 ? -1 : 1;
+    const cx    = side * 80;  // nebula center x
+    // Gaussian-ish spread around nebula center
+    const r     = 20 + Math.random() * 100;
+    const theta = Math.random() * Math.PI * 2;
+    const phi   = Math.acos(2 * Math.random() - 1);
+    const x = cx + r * Math.sin(phi) * Math.cos(theta);
+    const y =      r * Math.sin(phi) * Math.sin(theta);
+    const z =      r * Math.cos(phi);
+    basePos[i*3]   = x; basePos[i*3+1] = y; basePos[i*3+2] = z;
+    positions[i*3] = x; positions[i*3+1] = y; positions[i*3+2] = z;
+    teamSide[i]    = side;
+    starSizes[i]   = 1.5 + Math.random() * 4;
   }
-  // Moment overlay: show in minimal, hide in anime (chyron replaces it)
-  document.getElementById('moment-overlay').style.display = isAnime ? 'none' : '';
+
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+  geo.setAttribute('size',     new THREE.BufferAttribute(starSizes, 1));
+  geo.setAttribute('side',     new THREE.BufferAttribute(teamSide,  1));
+
+  const mat = new THREE.ShaderMaterial({
+    uniforms: {
+      homeColor: { value: new THREE.Color(0x1D428A) },
+      awayColor: { value: new THREE.Color(0x860038) },
+      homePos:   { value: new THREE.Vector3(-80, 0, 0) },
+      awayPos:   { value: new THREE.Vector3( 80, 0, 0) },
+      momentum:  { value: 0.0 },
+      energy:    { value: 0.5 },
+    },
+    vertexShader: `
+      attribute float size;
+      attribute float side;
+      uniform vec3  homePos;
+      uniform vec3  awayPos;
+      uniform float momentum;
+      uniform float energy;
+      varying float vSide;
+
+      void main() {
+        // side is -1 for home, +1 for away — baked at creation time
+
+        // Gravity: pull toward the dominant attractor
+        float homeStr = clamp(0.5 - momentum * 0.5, 0.0, 1.0);
+        float awayStr = clamp(0.5 + momentum * 0.5, 0.0, 1.0);
+        float pull = (side < 0.0) ? homeStr : awayStr;
+
+        // The dominant team's stars spread outward; losing team contracts inward
+        float scale = 0.6 + pull * 0.8;
+        vec3 center = (side < 0.0) ? homePos : awayPos;
+        vec3 offset = position - center;
+        vec3 newPos = center + offset * scale;
+
+        vSide = side;
+        vec4 mvPos = modelViewMatrix * vec4(newPos, 1.0);
+        gl_PointSize = size * (1.0 + energy * 1.5) * (300.0 / -mvPos.z);
+        gl_Position  = projectionMatrix * mvPos;
+      }
+    `,
+    fragmentShader: `
+      uniform vec3  homeColor;
+      uniform vec3  awayColor;
+      uniform float momentum;
+      uniform float energy;
+      varying float vSide;
+
+      void main() {
+        // Soft circular point
+        vec2  uv   = gl_PointCoord - 0.5;
+        float dist = length(uv);
+        if (dist > 0.5) discard;
+        float alpha = (1.0 - dist * 2.0) * (0.5 + energy * 0.5);
+
+        // Blend toward dominant team's color
+        float t = clamp((momentum + 1.0) * 0.5, 0.0, 1.0);
+        vec3 col = mix(homeColor, awayColor, t);
+        // Stars on the losing side tint slightly toward grey
+        float dimmer = (vSide < 0.0) ? (1.0 - clamp(momentum, 0.0, 1.0) * 0.4)
+                                      : (1.0 + clamp(momentum, -1.0, 0.0) * 0.4);
+        col *= dimmer;
+
+        gl_FragColor = vec4(col, alpha);
+      }
+    `,
+    transparent: true,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending,
+  });
+
+  const stars = new THREE.Points(geo, mat);
+  scene.add(stars);
+
+  // ── Post-processing ──────────────────────────────────────────────
+  const composer = new EffectComposer(renderer);
+  composer.addPass(new RenderPass(scene, camera));
+
+  const bloom = new UnrealBloomPass(
+    new THREE.Vector2(window.innerWidth, window.innerHeight),
+    1.4,   // strength
+    0.4,   // radius
+    0.15   // threshold
+  );
+  composer.addPass(bloom);
+
+  // Film grain + vignette as a single ShaderPass
+  const grainVignette = new ShaderPass({
+    uniforms: {
+      tDiffuse: { value: null },
+      time:     { value: 0.0 },
+      grainAmt: { value: 0.055 },
+    },
+    vertexShader: `
+      varying vec2 vUv;
+      void main() { vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0); }
+    `,
+    fragmentShader: `
+      uniform sampler2D tDiffuse;
+      uniform float     time;
+      uniform float     grainAmt;
+      varying vec2      vUv;
+
+      float rand(vec2 co) {
+        return fract(sin(dot(co, vec2(12.9898, 78.233))) * 43758.5453 + time);
+      }
+
+      void main() {
+        vec4 col = texture2D(tDiffuse, vUv);
+
+        // Grain
+        float grain = (rand(vUv) - 0.5) * grainAmt;
+        col.rgb += grain;
+
+        // Vignette
+        vec2  uv = vUv - 0.5;
+        float v  = 1.0 - dot(uv, uv) * 2.2;
+        col.rgb *= clamp(v, 0.0, 1.0);
+
+        gl_FragColor = col;
+      }
+    `,
+  });
+  composer.addPass(grainVignette);
+
+  // Handle resize
+  function onResize() {
+    const w = window.innerWidth, h = window.innerHeight;
+    renderer.setSize(w, h);
+    composer.setSize(w, h);
+    camera.aspect = w / h;
+    camera.updateProjectionMatrix();
+    bloom.resolution.set(w, h);
+  }
+  window.addEventListener('resize', onResize);
+
+  _three = { THREE, scene, camera, renderer, composer,
+             mat, geo, positions, basePos, teamSide,
+             grainVignette, bloom, onResize,
+             waveWasActive: false };
+  _cosmicLoading = false;
+}
+
+function destroyCosmic() {
+  if (!_three) return;
+  window.removeEventListener('resize', _three.onResize);
+  _three.renderer.dispose();
+  _three.geo.dispose();
+  _three.mat.dispose();
+  _three = null;
+}
+
+function triggerCosmicWave(intensity) {
+  _cosmicWave = Math.max(_cosmicWave, intensity);
+}
+
+function triggerCosmicSwap() {
+  _cosmicSwap    = 0.001; // kick off the swap lerp
+  _cosmicSwapDir *= -1;   // alternate direction each swap
+}
+
+function drawCosmic(dt) {
+  if (!_three || !game) return;
+  const { THREE, scene, camera, renderer, composer, mat, geo, positions, basePos, teamSide, grainVignette } = _three;
+
+  let momentum = sampleAt(game.momentumCurve, playheadSec);
+  let energy   = sampleAt(game.energyCurve,   playheadSec);
+  if (endSettleT > 0) {
+    const wm = game.finalScore.away > game.finalScore.home ? 1 : -1;
+    momentum = momentum + (wm - momentum) * endSettleT;
+    energy   = energy   * (1 - endSettleT * 0.6);
+  }
+
+  // ── Advance wave & swap ──────────────────────────────────────────
+  _cosmicWave = Math.max(0, _cosmicWave - 0.025 * dt / 16.67);
+  if (_cosmicSwap > 0) _cosmicSwap = Math.min(1, _cosmicSwap + 0.008 * dt / 16.67);
+
+  // ── Camera orbit ─────────────────────────────────────────────────
+  const timeLeft      = gameDuration() - playheadSec;
+  const finalMinutes  = timeLeft < 240;
+  const orbitSpeed    = finalMinutes ? 0.0008 : 0.00025;
+  const orbitRadius   = finalMinutes ? Math.max(180, 280 - (1 - timeLeft/240) * 100) : 280;
+  _camOrbitAngle += orbitSpeed * dt;
+  camera.position.x = Math.sin(_camOrbitAngle) * orbitRadius * 0.35;
+  camera.position.y = Math.cos(_camOrbitAngle * 0.6) * orbitRadius * 0.15;
+  camera.position.z = orbitRadius;
+  camera.lookAt(0, 0, 0);
+
+  // ── Attractor positions (lead-change swap) ────────────────────────
+  // Base: home=-80x, away=+80x. Swap lerp moves them through a vertical arc.
+  const swapEase = _cosmicSwap < 1 ? _cosmicSwap * _cosmicSwap * (3 - 2 * _cosmicSwap) : 1;
+  const homeSignedX = -80 * (1 - swapEase) + 80 * swapEase * _cosmicSwapDir;
+  const awaySignedX =  80 * (1 - swapEase) - 80 * swapEase * _cosmicSwapDir;
+  const arcY = Math.sin(_cosmicSwap * Math.PI) * 60; // arc peak
+  mat.uniforms.homePos.value.set(homeSignedX,  arcY, 0);
+  mat.uniforms.awayPos.value.set(awaySignedX, -arcY, 0);
+
+  // ── Update star positions for gravitational wave ──────────────────
+  const waveActive = _cosmicWave > 0.005;
+  if (waveActive !== _three.waveWasActive) {
+    // State transition: always update on change
+    _three.waveWasActive = waveActive;
+    if (!waveActive) {
+      geo.attributes.position.array.set(basePos);
+      geo.attributes.position.needsUpdate = true;
+    }
+  }
+  if (waveActive) {
+    const pos = geo.attributes.position.array;
+    const n   = pos.length / 3;
+    for (let i = 0; i < n; i++) {
+      const bx = basePos[i*3], by = basePos[i*3+1], bz = basePos[i*3+2];
+      const dist = Math.sqrt(bx*bx + by*by + bz*bz);
+      const push = _cosmicWave * 18 * Math.exp(-dist / 90);
+      const nx = dist > 0.001 ? bx / dist : 0;
+      const ny = dist > 0.001 ? by / dist : 0;
+      const nz = dist > 0.001 ? bz / dist : 0;
+      pos[i*3]   = bx + nx * push;
+      pos[i*3+1] = by + ny * push;
+      pos[i*3+2] = bz + nz * push;
+    }
+    geo.attributes.position.needsUpdate = true;
+  }
+
+  // ── Update shader uniforms ────────────────────────────────────────
+  mat.uniforms.momentum.value = momentum;
+  mat.uniforms.energy.value   = energy;
+
+  const homeRgb = hexToRgb(game.homeColor);
+  const awayRgb = hexToRgb(game.awayColor);
+  mat.uniforms.homeColor.value.setRGB(homeRgb[0]/255, homeRgb[1]/255, homeRgb[2]/255);
+  mat.uniforms.awayColor.value.setRGB(awayRgb[0]/255, awayRgb[1]/255, awayRgb[2]/255);
+
+  // Bloom strength: higher energy = more bloom
+  _three.bloom.strength = 1.0 + energy * 1.2;
+
+  // Grain time uniform (animates noise)
+  grainVignette.uniforms.time.value += dt * 0.001;
+
+  composer.render();
+}
+
+// ─── Mode toggle ──────────────────────────────────────────────────────────────
+const MODES = ['minimal', 'anime', 'cosmic'];
+const modeBtn = document.getElementById('mode-btn');
+
+function applyMode(mode) {
+  currentMode = mode;
+  const canvas2d     = document.getElementById('c');
+  const cosmicCanvas = document.getElementById('cosmic-c');
+
+  // Canvas visibility
+  canvas2d.style.display     = mode === 'cosmic' ? 'none' : 'block';
+  cosmicCanvas.style.display = mode === 'cosmic' ? 'block' : 'none';
+
+  // Button label + class
+  modeBtn.className = '';
+  if (mode === 'anime')  { modeBtn.textContent = 'Anime';   modeBtn.classList.add('anime'); }
+  if (mode === 'cosmic') { modeBtn.textContent = 'Cosmic';  modeBtn.classList.add('cosmic'); }
+  if (mode === 'minimal'){ modeBtn.textContent = 'Minimal'; }
+
+  // Reset mode-specific transient state
+  if (mode !== 'anime') { shakeX=0; shakeY=0; shakeTtl=0; flashAlpha=0; runGlow=0; hideChyron(); }
+  if (mode !== 'cosmic') { _cosmicWave=0; _cosmicSwap=0; }
+
+  // Moment overlay: only visible in minimal
+  document.getElementById('moment-overlay').style.display = mode === 'minimal' ? '' : 'none';
+
+  // Lazy-init Three.js on first switch to cosmic
+  if (mode === 'cosmic') initCosmic();
+}
+
+modeBtn.addEventListener('click', () => {
+  const next = MODES[(MODES.indexOf(currentMode) + 1) % MODES.length];
+  applyMode(next);
 });
 
 // ─── Boot ─────────────────────────────────────────────────────────────────────
