@@ -252,7 +252,7 @@ const GAME_SENTENCES = {
 async function loadGame(gameId) {
   const res = await fetch(`data/${gameId}.json`);
   game = await res.json();
-  eventIdx = 0;
+  eventIdx = 0; _scoreIdx = 0; _scoreH = 0; _scoreA = 0;
   document.getElementById('start-title').textContent = game.title;
   document.getElementById('start-meta').textContent =
     `${game.awayTeam} vs ${game.homeTeam}  ·  ${game.date}`;
@@ -427,13 +427,19 @@ function renderFrame(dt) {
 }
 
 // ─── Score UI ─────────────────────────────────────────────────────────────────
+let _scoreH = 0, _scoreA = 0, _scoreIdx = 0;
+
 function findScore(sec) {
-  let h = 0, a = 0;
-  for (const e of game.events) {
-    if (e.t > sec) break;
-    if (e.homeScore > 0 || e.awayScore > 0) { h = e.homeScore; a = e.awayScore; }
+  return { h: _scoreH, a: _scoreA };
+}
+
+function advanceScore(sec) {
+  const events = game.events;
+  while (_scoreIdx < events.length && events[_scoreIdx].t <= sec) {
+    const e = events[_scoreIdx];
+    if (e.homeScore > 0 || e.awayScore > 0) { _scoreH = e.homeScore; _scoreA = e.awayScore; }
+    _scoreIdx++;
   }
-  return { h, a };
 }
 
 function updateScoreUI() {
@@ -452,7 +458,7 @@ const overlay = document.getElementById('moment-overlay');
 
 function checkMoments() {
   if (!game.keyMoments.length) return;
-  const windowSec = 80; // game-seconds to show each overlay (≈4 real-sec at 1x)
+  const windowSec = 20; // game-seconds to show each overlay (≈1 real-sec at 1x)
   for (let i = 0; i < game.keyMoments.length; i++) {
     const km   = game.keyMoments[i];
     const diff = playheadSec - km.t;
@@ -504,7 +510,7 @@ function buildTimeline() {
     lead_change: '#888',
     run_start:   '#e8a020',
     clutch_shot: '#e05050',
-    timeout:     '#444',
+    timeout:     '#5580aa',
   };
 
   game.keyMoments.forEach(km => {
@@ -648,9 +654,6 @@ function fireEventAudio(evt) {
     // Home team = higher pitch (440Hz range), away = lower (220Hz range)
     const freq = evt.team === 'home' ? 440 + evt.scoreDelta * 40 : 220 + evt.scoreDelta * 20;
     firePluck(freq, 0.06 + energy * 0.08);
-  } else if (evt.type === 'free_throw') {
-    const freq = evt.team === 'home' ? 392 : 196;
-    firePluck(freq, 0.04);
   } else if (evt.type === 'turnover') {
     fireTransient(0.05 + energy * 0.06);
   } else if (evt.type === 'timeout') {
@@ -727,12 +730,13 @@ function tick(ts) {
       playheadSec = gameDuration();
       showEndCard();
     }
-    // Fire audio for each event the playhead crossed this frame
+    // Advance per-event pointers
     if (game) {
       while (eventIdx < game.events.length && game.events[eventIdx].t <= playheadSec) {
         fireEventAudio(game.events[eventIdx]);
         eventIdx++;
       }
+      advanceScore(playheadSec);
     }
   }
 
@@ -744,10 +748,11 @@ function tick(ts) {
 function seek(sec) {
   playheadSec   = Math.max(0, Math.min(gameDuration(), sec));
   lastMomentIdx = -1;
-  // Reset event pointer to correct position after seek
   eventIdx = 0;
+  _scoreIdx = 0; _scoreH = 0; _scoreA = 0;
   if (game) {
     while (eventIdx < game.events.length && game.events[eventIdx].t <= sec) eventIdx++;
+    advanceScore(sec);
   }
 }
 
