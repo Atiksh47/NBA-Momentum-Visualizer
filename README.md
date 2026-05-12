@@ -81,7 +81,7 @@ pip install nba_api
 python scripts/fetch_games.py   # writes data/*.json, ~30s
 ```
 
-Then open `index.html` directly in a browser, or serve locally:
+Then open `index.html` in a browser (game picker), or serve locally to avoid CORS issues with the JSON files:
 
 ```bash
 npx serve .
@@ -89,7 +89,9 @@ npx serve .
 python -m http.server 8000
 ```
 
-No build step. No dependencies at runtime.
+Navigate to `http://localhost:8000`, pick a game, and the visualizer opens in `visualizer.html`.
+
+No build step. No runtime dependencies.
 
 ---
 
@@ -102,6 +104,7 @@ No build step. No dependencies at runtime.
 | Timeline | Scrub to any moment; colored ticks mark key events |
 | ½× 1× 2× 4× | Speed — full game is ~10 min at 4× |
 | Mode button | Cycles Minimal → Anime → Cosmic → Broadcast |
+| ← Back | Returns to the game picker |
 
 ---
 
