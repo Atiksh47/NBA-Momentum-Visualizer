@@ -199,6 +199,65 @@ def fill_scores(events: list[dict], n: int, sample_rate: float) -> tuple[list[fl
     return home_scores, away_scores
 
 
+def compute_fg_pct(events: list[dict], n: int, team: str, window_shots: int = 10) -> list[float]:
+    """Rolling FG% over last N shot attempts for one team, sampled per second."""
+    shot_events = [
+        e for e in events
+        if e["team"] == team and e["type"] in ("score", "miss")
+        and e.get("scoreDelta", 0) != 1  # exclude free throws
+    ]
+    result = [0.5] * n  # neutral default
+    for s in range(n):
+        t = s * 1.0
+        recent = [e for e in shot_events if e["t"] <= t][-window_shots:]
+        if len(recent) < 3:
+            result[s] = 0.5
+        else:
+            made = sum(1 for e in recent if e["type"] == "score")
+            result[s] = round(made / len(recent), 4)
+    return result
+
+
+def compute_foul_counts(events: list[dict], n: int) -> tuple[list[int], list[int]]:
+    """Cumulative fouls per team within the current half, reset at halftime."""
+    home_fouls = [0] * n
+    away_fouls = [0] * n
+    hf, af = 0, 0
+    last_period = 1
+    ei = 0
+    foul_evts = [e for e in events if e["type"] == "foul"]
+    fi = 0
+
+    for s in range(n):
+        t = s * 1.0
+        period = min(int(t / 720) + 1, 4)
+        # Reset at halftime (period 3 start)
+        if period >= 3 and last_period < 3:
+            hf, af = 0, 0
+        last_period = period
+        while fi < len(foul_evts) and foul_evts[fi]["t"] <= t:
+            if foul_evts[fi]["team"] == "home":
+                hf += 1
+            elif foul_evts[fi]["team"] == "away":
+                af += 1
+            fi += 1
+        home_fouls[s] = hf
+        away_fouls[s] = af
+
+    return home_fouls, away_fouls
+
+
+def compute_turnover_burst(events: list[dict], n: int, window: int = 60) -> list[float]:
+    """Combined turnovers per team per rolling 60s window, normalized 0→1."""
+    to_evts = [e for e in events if e["type"] == "turnover"]
+    result = [0.0] * n
+    for s in range(n):
+        t = s * 1.0
+        count = sum(1 for e in to_evts if t - window < e["t"] <= t)
+        result[s] = round(min(1.0, count / 6.0), 4)
+    return result
+
+
 def compute_momentum(events: list[dict], game_duration: float) -> dict:
     SAMPLE_RATE = 1.0
     n = int(game_duration / SAMPLE_RATE) + 1
@@ -216,6 +275,12 @@ def compute_momentum(events: list[dict], game_duration: float) -> dict:
         s = min(int(e["t"]), n - 1)
         events_by_second[s].append(e)
 
+    # Richer signals
+    home_fg  = compute_fg_pct(events, n, "home")
+    away_fg  = compute_fg_pct(events, n, "away")
+    home_fouls, away_fouls = compute_foul_counts(events, n)
+    to_burst = compute_turnover_burst(events, n)
+
     for s in range(n):
         t = s * SAMPLE_RATE
 
@@ -232,7 +297,10 @@ def compute_momentum(events: list[dict], game_duration: float) -> dict:
             2 * (away_run_short - home_run_short) +
             1 * (away_run_long  - home_run_long)
         )
-        raw_momentum = math.tanh(run_diff / 15.0)
+
+        # FG% differential nudges momentum — team shooting 70% feels dominant
+        fg_diff = (away_fg[s] - home_fg[s]) * 10.0  # scale to ~same range as run_diff
+        raw_momentum = math.tanh((run_diff + fg_diff) / 15.0)
 
         # Score differential: closeness = tension
         diff = abs(away_scores[s] - home_scores[s])
@@ -252,25 +320,32 @@ def compute_momentum(events: list[dict], game_duration: float) -> dict:
 
         total_run_short = max(home_run_short, away_run_short)
 
+        # Turnover burst boosts energy (chaotic moments feel intense)
         raw_energy = (
-            0.30 * pace +
-            0.30 * closeness +
-            0.20 * min(1.0, total_run_short / 12.0) +
-            0.20 * min(1.0, (time_pressure - 1.0) / 2.5)
+            0.25 * pace +
+            0.25 * closeness +
+            0.18 * min(1.0, total_run_short / 12.0) +
+            0.18 * min(1.0, (time_pressure - 1.0) / 2.5) +
+            0.14 * to_burst[s]
         )
 
         momentum[s] = round(max(-1.0, min(1.0, raw_momentum * time_pressure)), 4)
         energy[s]   = round(min(1.0, max(0.0, raw_energy)), 4)
 
     return {
-        "momentum": momentum,
-        "energy": energy,
-        "sampleRate": SAMPLE_RATE,
-        "duration": game_duration,
+        "momentum":    momentum,
+        "energy":      energy,
+        "homeFgPct":   home_fg,
+        "awayFgPct":   away_fg,
+        "homeFouls":   home_fouls,
+        "awayFouls":   away_fouls,
+        "toBurst":     to_burst,
+        "sampleRate":  SAMPLE_RATE,
+        "duration":    game_duration,
     }
 
 
-def detect_key_moments(events: list[dict], momentum: list[float], energy: list[float]) -> list[dict]:
+def detect_key_moments(events: list[dict], momentum: list[float], energy: list[float], curves: dict | None = None) -> list[dict]:
     moments = []
     last_lead = "tied"
     home_run = 0
@@ -339,6 +414,22 @@ def detect_key_moments(events: list[dict], momentum: list[float], energy: list[f
                 "intensity": round(energy[s], 3),
             })
 
+    # Foul trouble: flag when a team hits 4+ fouls in a half (using curves if available)
+    if curves:
+        home_fouls = curves.get("homeFouls", [])
+        away_fouls = curves.get("awayFouls", [])
+        home_trouble_fired = set()  # which half (1 or 2) already fired
+        away_trouble_fired = set()
+        for s, (hf, af) in enumerate(zip(home_fouls, away_fouls)):
+            t = float(s)
+            half = 1 if t < 1440 else 2
+            if hf >= 4 and half not in home_trouble_fired:
+                home_trouble_fired.add(half)
+                moments.append({"t": t, "label": "Foul Trouble", "type": "foul_trouble", "team": "home", "intensity": min(1.0, hf / 6.0)})
+            if af >= 4 and half not in away_trouble_fired:
+                away_trouble_fired.add(half)
+                moments.append({"t": t, "label": "Foul Trouble", "type": "foul_trouble", "team": "away", "intensity": min(1.0, af / 6.0)})
+
     # Deduplicate: no two moments within 20 seconds
     moments.sort(key=lambda m: m["t"])
     deduped = []
@@ -368,7 +459,7 @@ def process_game(game: dict) -> dict:
     print(f"  Duration: {game_duration/60:.1f} min ({periods} periods)")
 
     curves = compute_momentum(events, game_duration)
-    key_moments = detect_key_moments(events, curves["momentum"], curves["energy"])
+    key_moments = detect_key_moments(events, curves["momentum"], curves["energy"], curves)
     print(f"  Key moments: {len(key_moments)}")
 
     last_scored = next((e for e in reversed(events) if e["homeScore"] > 0), None)
@@ -392,6 +483,11 @@ def process_game(game: dict) -> dict:
         "sampleRate":         curves["sampleRate"],
         "momentumCurve":      curves["momentum"],
         "energyCurve":        curves["energy"],
+        "homeFgPct":          curves["homeFgPct"],
+        "awayFgPct":          curves["awayFgPct"],
+        "homeFouls":          curves["homeFouls"],
+        "awayFouls":          curves["awayFouls"],
+        "toBurst":            curves["toBurst"],
         "keyMoments":         key_moments,
         "events":             events,
     }

@@ -159,8 +159,9 @@ canvas { display: block; }
   flex-shrink: 0;
 }
 #mode-btn:hover { color: #fff; border-color: rgba(255,255,255,0.5); }
-#mode-btn.anime  { color: #ff4466; border-color: rgba(255,68,102,0.5); }
-#mode-btn.cosmic { color: #88aaff; border-color: rgba(136,170,255,0.5); }
+#mode-btn.anime      { color: #ff4466; border-color: rgba(255,68,102,0.5); }
+#mode-btn.cosmic     { color: #88aaff; border-color: rgba(136,170,255,0.5); }
+#mode-btn.broadcast  { color: #ffcc44; border-color: rgba(255,204,68,0.5); }
 
 #cosmic-c {
   display: none;
@@ -198,6 +199,150 @@ canvas { display: block; }
 }
 #chyron-inner.wipe-in  { transform: translateX(0);    transition: transform 0.18s cubic-bezier(0.2,0,0,1); }
 #chyron-inner.wipe-out { transform: translateX(-110%); transition: transform 0.22s cubic-bezier(0.4,0,1,1); }
+
+/* ── Broadcast HUD ── */
+#broadcast-hud {
+  display: none;
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 20;
+  font-family: 'Arial', sans-serif;
+}
+
+/* Score bug */
+#bc-score-bug {
+  position: absolute;
+  top: 20px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: stretch;
+  height: 52px;
+  border-radius: 4px;
+  overflow: hidden;
+  box-shadow: 0 2px 16px rgba(0,0,0,0.7);
+}
+.bc-team-block {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 16px;
+  min-width: 110px;
+}
+.bc-team-block.home { flex-direction: row; }
+.bc-team-block.away { flex-direction: row-reverse; }
+.bc-tricode {
+  font-size: 15px;
+  font-weight: 900;
+  letter-spacing: 0.08em;
+  color: #fff;
+  text-shadow: 0 1px 4px rgba(0,0,0,0.5);
+}
+.bc-score {
+  font-size: 22px;
+  font-weight: 900;
+  color: #fff;
+  min-width: 28px;
+  text-align: center;
+}
+.bc-foul-badge {
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  color: #ff4444;
+  background: rgba(255,68,68,0.18);
+  border: 1px solid rgba(255,68,68,0.5);
+  border-radius: 2px;
+  padding: 1px 4px;
+  align-self: center;
+  opacity: 0;
+  transition: opacity 0.4s;
+}
+.bc-foul-badge.visible { opacity: 1; }
+#bc-clock-block {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 0 14px;
+  background: rgba(10,10,20,0.92);
+  min-width: 72px;
+  border-left: 1px solid rgba(255,255,255,0.08);
+  border-right: 1px solid rgba(255,255,255,0.08);
+}
+#bc-clock { font-size: 17px; font-weight: 700; color: #fff; letter-spacing: 0.05em; }
+#bc-period { font-size: 10px; color: rgba(255,255,255,0.5); letter-spacing: 0.2em; text-transform: uppercase; margin-top: 2px; }
+
+/* Momentum bar */
+#bc-momentum-bar {
+  position: absolute;
+  top: 78px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 340px;
+  height: 4px;
+  background: rgba(255,255,255,0.1);
+  border-radius: 2px;
+  overflow: hidden;
+}
+#bc-momentum-fill {
+  position: absolute;
+  top: 0; bottom: 0;
+  transition: left 0.4s ease, right 0.4s ease, background 0.4s ease;
+}
+
+/* Shooting streak tag */
+#bc-streak {
+  position: absolute;
+  top: 96px;
+  left: 50%;
+  transform: translateX(-50%);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.15em;
+  text-transform: uppercase;
+  padding: 3px 10px;
+  border-radius: 3px;
+  white-space: nowrap;
+  opacity: 0;
+  transition: opacity 0.3s;
+}
+#bc-streak.visible { opacity: 1; }
+
+/* Live run banner */
+#bc-run-banner {
+  position: absolute;
+  bottom: 120px;
+  left: 0;
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: #fff;
+  background: rgba(10,10,20,0.88);
+  border-left: 4px solid #fff;
+  padding: 8px 18px;
+  opacity: 0;
+  transform: translateX(-8px);
+  transition: opacity 0.3s, transform 0.3s;
+}
+#bc-run-banner.visible { opacity: 1; transform: translateX(0); }
+
+/* Quarter recap */
+#bc-recap {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  text-align: center;
+  opacity: 0;
+  transition: opacity 0.5s;
+  pointer-events: none;
+}
+#bc-recap.visible { opacity: 1; }
+#bc-recap-label { font-size: 11px; letter-spacing: 0.4em; text-transform: uppercase; color: rgba(255,255,255,0.4); margin-bottom: 8px; }
+#bc-recap-score { font-size: 48px; font-weight: 900; color: #fff; letter-spacing: -0.02em; }
 
 /* ── Start screen ── */
 #start-screen {
@@ -278,6 +423,32 @@ canvas { display: block; }
 </div>
 
 <div id="chyron"><div id="chyron-inner"></div></div>
+
+<div id="broadcast-hud">
+  <div id="bc-score-bug">
+    <div class="bc-team-block home" id="bc-home-block">
+      <div class="bc-tricode" id="bc-home-tri"></div>
+      <div class="bc-score" id="bc-home-score">0</div>
+      <div class="bc-foul-badge" id="bc-home-fouls">FOULS</div>
+    </div>
+    <div id="bc-clock-block">
+      <div id="bc-clock">12:00</div>
+      <div id="bc-period">Q1</div>
+    </div>
+    <div class="bc-team-block away" id="bc-away-block">
+      <div class="bc-tricode" id="bc-away-tri"></div>
+      <div class="bc-score" id="bc-away-score">0</div>
+      <div class="bc-foul-badge" id="bc-away-fouls">FOULS</div>
+    </div>
+  </div>
+  <div id="bc-momentum-bar"><div id="bc-momentum-fill"></div></div>
+  <div id="bc-streak"></div>
+  <div id="bc-run-banner"></div>
+  <div id="bc-recap">
+    <div id="bc-recap-label"></div>
+    <div id="bc-recap-score"></div>
+  </div>
+</div>
 
 <div id="end-card">
   <div id="end-winner"></div>
@@ -643,9 +814,10 @@ function drawAnime(dt) {
 
 function renderFrame(dt) {
   if (!game) return;
-  if (currentMode === 'anime')  drawAnime(dt);
+  if (currentMode === 'anime')       drawAnime(dt);
   else if (currentMode === 'cosmic') drawCosmic(dt);
-  else                          drawMinimal(dt);
+  else if (currentMode === 'broadcast') drawBroadcast(dt);
+  else                               drawMinimal(dt);
 }
 
 // ─── Score UI ─────────────────────────────────────────────────────────────────
@@ -1019,6 +1191,7 @@ function tick(ts) {
     if (game) {
       while (eventIdx < game.events.length && game.events[eventIdx].t <= playheadSec) {
         fireEventAudio(game.events[eventIdx]);
+        updateBroadcastRun(game.events[eventIdx]);
         eventIdx++;
       }
       advanceScore(playheadSec);
@@ -1035,6 +1208,7 @@ function seek(sec) {
   lastMomentIdx = -1;
   eventIdx = 0;
   _scoreIdx = 0; _scoreH = 0; _scoreA = 0;
+  _bcRunTeam = null; _bcRunPts = 0;
   if (game) {
     while (eventIdx < game.events.length && game.events[eventIdx].t <= sec) eventIdx++;
     advanceScore(sec);
@@ -1388,8 +1562,174 @@ function drawCosmic(dt) {
   composer.render();
 }
 
+// ─── Broadcast renderer ───────────────────────────────────────────────────────
+let _bcRunTeam = null;   // 'home' | 'away' | null — which team is on a live run
+let _bcRunPts  = 0;
+let _bcRecapTimer = 0;   // ms remaining for quarter-end recap card
+let _bcLastPeriod = 1;
+
+function drawBroadcast(dt) {
+  const { energy, primary, secondary, activeCount } = simulateAndGetParams(dt);
+
+  // Slightly lighter trail fade than minimal so background stays legible
+  ctx.fillStyle = `rgba(8,12,28,${0.22 - energy * 0.06})`;
+  ctx.fillRect(0, 0, W, H);
+
+  // Subtle central glow
+  if (energy > 0.1) {
+    const r   = Math.min(W, H) * 0.6;
+    const grd = ctx.createRadialGradient(W/2, H/2, 0, W/2, H/2, r);
+    grd.addColorStop(0, rgbStr(primary, energy * 0.06));
+    grd.addColorStop(1, 'rgba(0,0,0,0)');
+    ctx.fillStyle = grd;
+    ctx.fillRect(0, 0, W, H);
+  }
+
+  // Particles — same as minimal but slightly smaller
+  for (let i = 0; i < activeCount; i++) {
+    const p     = pool[i];
+    const alpha = (0.2 + energy * 0.45) * (0.6 + 0.4 * Math.sin(p.life * Math.PI * 2));
+    if (p.trail.length > 1) {
+      ctx.beginPath();
+      ctx.moveTo(p.trail[0].x, p.trail[0].y);
+      for (let j = 1; j < p.trail.length; j++) ctx.lineTo(p.trail[j].x, p.trail[j].y);
+      ctx.strokeStyle = rgbStr(secondary, alpha * 0.25);
+      ctx.lineWidth   = p.radius * 0.5;
+      ctx.stroke();
+    }
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, p.radius * (0.9 + energy * 0.3), 0, Math.PI * 2);
+    ctx.fillStyle = rgbStr(primary, alpha * 0.85);
+    ctx.fill();
+  }
+
+  updateBroadcastHUD(dt);
+}
+
+function bcClockStr(sec) {
+  const period    = Math.min(Math.floor(sec / 720) + 1, 4);
+  const inPeriod  = sec % 720;
+  const remaining = 720 - inPeriod;
+  const m = Math.floor(remaining / 60);
+  const s = Math.floor(remaining % 60);
+  return { clock: `${m}:${s.toString().padStart(2, '0')}`, period: `Q${period}`, periodNum: period };
+}
+
+function updateBroadcastHUD(dt) {
+  if (!game) return;
+
+  const s   = Math.min(Math.round(playheadSec), game.momentumCurve.length - 1);
+  const momentum = game.momentumCurve[s];
+  const { h, a } = findScore(playheadSec);
+  const { clock, period, periodNum } = bcClockStr(playheadSec);
+
+  // Score bug
+  document.getElementById('bc-home-score').textContent = h;
+  document.getElementById('bc-away-score').textContent = a;
+  document.getElementById('bc-clock').textContent  = clock;
+  document.getElementById('bc-period').textContent = period;
+
+  // Foul trouble badges (4+ fouls in half)
+  if (game.homeFouls && game.awayFouls) {
+    const hf = game.homeFouls[s] || 0;
+    const af = game.awayFouls[s] || 0;
+    document.getElementById('bc-home-fouls').classList.toggle('visible', hf >= 4);
+    document.getElementById('bc-away-fouls').classList.toggle('visible', af >= 4);
+  }
+
+  // Momentum bar: home color on left, away on right, split at momentum midpoint
+  // momentum: -1 = full home, +1 = full away
+  const fill    = document.getElementById('bc-momentum-fill');
+  const midPct  = ((momentum + 1) / 2) * 100; // 0–100
+  if (momentum >= 0) {
+    // Away leading: fill from midpoint rightward in away color
+    fill.style.left       = '50%';
+    fill.style.right      = (100 - midPct) + '%';
+    fill.style.background = game.awayColor;
+  } else {
+    // Home leading: fill from midpoint leftward in home color
+    fill.style.left       = midPct + '%';
+    fill.style.right      = '50%';
+    fill.style.background = game.homeColor;
+  }
+
+  // Shooting streak tag
+  const streak = document.getElementById('bc-streak');
+  if (game.homeFgPct && game.awayFgPct) {
+    const hfg = game.homeFgPct[s];
+    const afg = game.awayFgPct[s];
+    if (hfg >= 0.60) {
+      streak.textContent = `${game.homeTeam} on fire  ${Math.round(hfg * 100)}% FG`;
+      streak.style.background = game.homeColor + 'cc';
+      streak.style.color = '#fff';
+      streak.classList.add('visible');
+    } else if (afg >= 0.60) {
+      streak.textContent = `${game.awayTeam} on fire  ${Math.round(afg * 100)}% FG`;
+      streak.style.background = game.awayColor + 'cc';
+      streak.style.color = '#fff';
+      streak.classList.add('visible');
+    } else if (hfg <= 0.25) {
+      streak.textContent = `${game.homeTeam} ice cold  ${Math.round(hfg * 100)}% FG`;
+      streak.style.background = 'rgba(40,60,100,0.85)';
+      streak.style.color = 'rgba(255,255,255,0.6)';
+      streak.classList.add('visible');
+    } else if (afg <= 0.25) {
+      streak.textContent = `${game.awayTeam} ice cold  ${Math.round(afg * 100)}% FG`;
+      streak.style.background = 'rgba(40,60,100,0.85)';
+      streak.style.color = 'rgba(255,255,255,0.6)';
+      streak.classList.add('visible');
+    } else {
+      streak.classList.remove('visible');
+    }
+  }
+
+  // Live run banner — track unanswered scoring from events
+  const banner = document.getElementById('bc-run-banner');
+  if (_bcRunPts > 0 && _bcRunTeam) {
+    const teamName = _bcRunTeam === 'home' ? game.homeTeam : game.awayTeam;
+    const color    = _bcRunTeam === 'home' ? game.homeColor : game.awayColor;
+    banner.textContent = `${teamName} on a ${_bcRunPts}-0 run`;
+    banner.style.borderLeftColor = color;
+    banner.classList.add('visible');
+  } else {
+    banner.classList.remove('visible');
+  }
+
+  // Quarter recap card — show for 3s after a period ends
+  if (_bcRecapTimer > 0) {
+    _bcRecapTimer -= dt;
+    document.getElementById('bc-recap').classList.add('visible');
+    if (_bcRecapTimer <= 0) document.getElementById('bc-recap').classList.remove('visible');
+  }
+
+  // Detect period boundary to show recap
+  if (periodNum !== _bcLastPeriod && periodNum > _bcLastPeriod) {
+    const finishedQ = _bcLastPeriod;
+    document.getElementById('bc-recap-label').textContent = `End of Q${finishedQ}`;
+    document.getElementById('bc-recap-score').textContent = `${game.homeTeam}  ${h} — ${a}  ${game.awayTeam}`;
+    _bcRecapTimer = 3000;
+    _bcLastPeriod = periodNum;
+  }
+}
+
+// Called from the main event loop to track live run for broadcast banner
+function updateBroadcastRun(evt) {
+  if (currentMode !== 'broadcast') return;
+  if (evt.type !== 'score' && evt.type !== 'free_throw') return;
+  if (evt.scoreDelta === 0) return;
+
+  if (_bcRunTeam === null || _bcRunTeam === evt.team) {
+    _bcRunTeam = evt.team;
+    _bcRunPts += evt.scoreDelta;
+  } else {
+    // Other team scored — reset run
+    _bcRunTeam = evt.team;
+    _bcRunPts  = evt.scoreDelta;
+  }
+}
+
 // ─── Mode toggle ──────────────────────────────────────────────────────────────
-const MODES = ['minimal', 'anime', 'cosmic'];
+const MODES = ['minimal', 'anime', 'cosmic', 'broadcast'];
 const modeBtn = document.getElementById('mode-btn');
 
 function applyMode(mode) {
@@ -1403,16 +1743,35 @@ function applyMode(mode) {
 
   // Button label + class
   modeBtn.className = '';
-  if (mode === 'anime')  { modeBtn.textContent = 'Anime';   modeBtn.classList.add('anime'); }
-  if (mode === 'cosmic') { modeBtn.textContent = 'Cosmic';  modeBtn.classList.add('cosmic'); }
-  if (mode === 'minimal'){ modeBtn.textContent = 'Minimal'; }
+  if (mode === 'anime')      { modeBtn.textContent = 'Anime';      modeBtn.classList.add('anime'); }
+  if (mode === 'cosmic')     { modeBtn.textContent = 'Cosmic';     modeBtn.classList.add('cosmic'); }
+  if (mode === 'broadcast')  { modeBtn.textContent = 'Broadcast';  modeBtn.classList.add('broadcast'); }
+  if (mode === 'minimal')    { modeBtn.textContent = 'Minimal'; }
 
   // Reset mode-specific transient state
   if (mode !== 'anime') { shakeX=0; shakeY=0; shakeTtl=0; flashAlpha=0; runGlow=0; hideChyron(); }
   if (mode !== 'cosmic') { _cosmicWave=0; _cosmicSwap=0; }
+  if (mode !== 'broadcast') {
+    document.getElementById('broadcast-hud').style.display = 'none';
+  }
 
   // Moment overlay: only visible in minimal
   document.getElementById('moment-overlay').style.display = mode === 'minimal' ? '' : 'none';
+
+  // Broadcast HUD setup
+  if (mode === 'broadcast' && game) {
+    const hud = document.getElementById('broadcast-hud');
+    hud.style.display = 'block';
+    // Color the team blocks
+    document.getElementById('bc-home-block').style.background = game.homeColor + 'dd';
+    document.getElementById('bc-away-block').style.background = game.awayColor + 'dd';
+    document.getElementById('bc-home-tri').textContent = game.homeTeam;
+    document.getElementById('bc-away-tri').textContent = game.awayTeam;
+    // Reset run tracker
+    _bcRunTeam = null; _bcRunPts = 0;
+    _bcRecapTimer = 0; _bcLastPeriod = Math.min(Math.floor(playheadSec / 720) + 1, 4);
+    document.getElementById('bc-recap').classList.remove('visible');
+  }
 
   // Lazy-init Three.js on first switch to cosmic
   if (mode === 'cosmic') initCosmic();
