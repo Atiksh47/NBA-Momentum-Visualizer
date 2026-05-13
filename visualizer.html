@@ -683,6 +683,37 @@ function resetStateMemory() {
   _lastClutchT       = -9999;
 }
 
+// ─── Tension Memory ───────────────────────────────────────────────────────────
+// Accumulates dramatic weight from high-stakes events; decays over ~4 game-minutes.
+// Unlike _aftershockPool (crowd reaction) or _momentumMemory (direction), this
+// tracks the sustained psychological pressure that lingers after big moments.
+let tensionMemory     = 0.0;
+let _prevTensionEnergy = 0.0;   // tracks sustained high-energy windows
+let _tensionEnergyTimer = 0.0;  // seconds above 0.8 energy (game-time)
+
+function updateTensionMemory(rawEnergy, dt) {
+  const dtSec = dt / 1000 * speed;  // game-seconds elapsed
+  // Decay: τ ≈ 4 game-minutes (240s)
+  tensionMemory *= Math.exp(-dtSec / 240);
+
+  // Charge from sustained high energy: +0.10/s while energy > 0.8 for 10+ seconds
+  if (rawEnergy > 0.8) {
+    _tensionEnergyTimer += dtSec;
+    if (_tensionEnergyTimer >= 10) {
+      tensionMemory = Math.min(1.0, tensionMemory + 0.10 * dtSec);
+    }
+  } else {
+    _tensionEnergyTimer = 0;
+  }
+  _prevTensionEnergy = rawEnergy;
+}
+
+function resetTensionMemory() {
+  tensionMemory       = 0;
+  _prevTensionEnergy  = 0;
+  _tensionEnergyTimer = 0;
+}
+
 // Called from checkMoments when a clutch/lead-change fires
 function noteClutchMoment() {
   const now = playheadSec;
@@ -713,6 +744,9 @@ function simulateAndGetParams(dt) {
   // Crowd Heat — effectiveEnergy with aftershock + hysteresis
   const energy = updateCrowdHeat(rawEnergy, dt);
 
+  // Tension Memory — slow-decay dramatic weight; also charges from sustained high energy
+  updateTensionMemory(rawEnergy, dt);
+
   // highStakes adds a subtle persistent energy floor
   const baselineEnergy = _highStakes ? Math.max(energy, 0.35) : energy;
 
@@ -729,8 +763,8 @@ function simulateAndGetParams(dt) {
   const gravX = momentum * 0.8;  // physics constant, not a UI scale
   const gravY = 0;
 
-  // Dead space: at true low energy, drop to 80 particles so the canvas can breathe
-  const deadSpaceFloor = 80;
+  // Dead space floor climbs 80→160 at peak tension — even quiet moments feel charged
+  const deadSpaceFloor = Math.round(80 + tensionMemory * 80);
   // Rare overload: when aftershock is saturated (>1.2) briefly allow up to 1800 particles
   const overloadCap = _aftershockPool > 1.2 ? 1800 : 1000;
   const activeCount = Math.min(overloadCap, Math.max(deadSpaceFloor, Math.round(150 + baselineEnergy * 850)));
@@ -768,7 +802,7 @@ function simulateAndGetParams(dt) {
     if (p.y > H+20) p.y = -20;
   }
 
-  return { momentum, energy: baselineEnergy, rawEnergy, primary, secondary, activeCount };
+  return { momentum, energy: baselineEnergy, rawEnergy, primary, secondary, activeCount, tensionMemory };
 }
 
 // ─── Per-mode signal shaping ─────────────────────────────────────────────────
@@ -815,7 +849,7 @@ function drawMinimal(dt) {
   const { primary, secondary, activeCount } = raw;
   const energy  = shaped.energy;
 
-  ctx.fillStyle = `rgba(0,0,0,${0.18 - energy * 0.05})`;
+  ctx.fillStyle = `rgba(0,0,0,${0.18 - energy * 0.05 + raw.tensionMemory * 0.05})`;
   ctx.fillRect(0, 0, W, H);
 
   if (energy > 0.15) {
@@ -902,7 +936,7 @@ function drawAnime(dt) {
   ctx.translate(shakeX, shakeY);
 
   // Dark trail fade — less transparent than minimal so trails burn in harder
-  ctx.fillStyle = `rgba(0,0,0,${0.12 - energy * 0.04})`;
+  ctx.fillStyle = `rgba(0,0,0,${0.12 - energy * 0.04 + raw.tensionMemory * 0.05})`;
   ctx.fillRect(-20, -20, W + 40, H + 40);
 
   // Vivid central glow
@@ -1319,6 +1353,17 @@ function fireEventAudio(evt) {
 
 // Called by checkMoments when a key moment is newly entered
 function fireMomentAudio(km) {
+  // Charge tensionMemory based on moment type
+  const tensionCharge = {
+    lead_change:      0.35,
+    clutch_shot:      0.25,
+    run_start:        0.20,
+    free_throw_miss:  0.30,
+  }[km.type] || 0;
+  if (tensionCharge > 0) {
+    tensionMemory = Math.min(1.0, tensionMemory + tensionCharge);
+  }
+
   if (audioCtx && playing) {
     if (km.type === 'lead_change') {
       const now = audioCtx.currentTime;
@@ -1409,6 +1454,12 @@ function updateAudio() {
     _compActive = false;
   }
 
+  // Tension memory squeezes the compressor harder — more pressure, more presence
+  if (_compActive) {
+    _clutchComp.threshold.value = -18 - tensionMemory * 8;  // -18 → -26 at full tension
+    _clutchComp.ratio.value     =   6 + tensionMemory * 4;  //   6 → 10
+  }
+
   if (clutchActive) {
     const bpm      = 60 + (1 - timeLeft / 240) * 30;
     const interval = 60 / bpm;
@@ -1460,6 +1511,7 @@ function seek(sec) {
   _bcRunTeam = null; _bcRunPts = 0;
   resetCrowdHeat();
   resetStateMemory();
+  resetTensionMemory();
   _minEnvEnergy = 0; _minEnvMomentum = 0;
   _animeFreeze  = 0;
   _bcDiscreteEnergy = 0; _bcDiscreteMomentum = 0; _bcLastEventT = -1;
@@ -1757,9 +1809,12 @@ function drawCosmic(dt) {
   const orbitSpeed    = finalMinutes ? 0.0008 : 0.00025;
   const orbitRadius   = finalMinutes ? Math.max(180, 280 - (1 - timeLeft/240) * 100) : 280;
   _camOrbitAngle += orbitSpeed * dt;
-  camera.position.x = Math.sin(_camOrbitAngle) * orbitRadius * 0.35;
-  camera.position.y = Math.cos(_camOrbitAngle * 0.6) * orbitRadius * 0.15;
-  camera.position.z = orbitRadius;
+  // Tension slows camera response — lerp factor 0.02 → 0.006 at full tension.
+  // High tension = momentum shifts arrive heavier, camera feels reluctant.
+  const camLerp = 0.02 - tensionMemory * 0.014;
+  camera.position.x += (Math.sin(_camOrbitAngle) * orbitRadius * 0.35 - camera.position.x) * camLerp;
+  camera.position.y += (Math.cos(_camOrbitAngle * 0.6) * orbitRadius * 0.15 - camera.position.y) * camLerp;
+  camera.position.z += (orbitRadius - camera.position.z) * camLerp;
   camera.lookAt(0, 0, 0);
 
   // ── Attractor positions (lead-change swap) ────────────────────────
@@ -1833,7 +1888,7 @@ function drawBroadcast(dt) {
   const bcCount = Math.floor(activeCount * 0.5);
 
   // Slightly lighter trail fade than minimal so background stays legible
-  ctx.fillStyle = `rgba(8,12,28,${0.22 - energy * 0.06})`;
+  ctx.fillStyle = `rgba(8,12,28,${0.22 - energy * 0.06 + raw.tensionMemory * 0.05})`;
   ctx.fillRect(0, 0, W, H);
 
   // Subtle central glow
