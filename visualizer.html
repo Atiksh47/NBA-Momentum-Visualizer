@@ -564,6 +564,54 @@ function rgbStr(rgb, alpha) {
   return `rgba(${rgb[0]},${rgb[1]},${rgb[2]},${alpha.toFixed(3)})`;
 }
 
+// Clamp an angle delta to [-max, max], wrapping through [-π, π]
+function clampAngle(delta, max) {
+  while (delta >  Math.PI) delta -= Math.PI * 2;
+  while (delta < -Math.PI) delta += Math.PI * 2;
+  return Math.max(-max, Math.min(max, delta));
+}
+
+// ─── Color gradient lag ───────────────────────────────────────────────────────
+// _displayPrimary / _displaySecondary lag behind the target color at τ≈3s.
+// When momentum shifts fast (>0.1/s game-time), briefly overshoot 15% past
+// the target before settling — color feels like it has inertia.
+let _displayPrimary   = null;  // [r,g,b] — lazy-initialised on first frame
+let _displaySecondary = null;
+let _prevMomentumForColor = 0;
+
+function updateDisplayColor(targetPrimary, targetSecondary, momentum, dt) {
+  const dtSec = dt / 1000;
+
+  if (!_displayPrimary) {
+    _displayPrimary   = targetPrimary.slice();
+    _displaySecondary = targetSecondary.slice();
+    _prevMomentumForColor = momentum;
+    return;
+  }
+
+  const colorLagTau = 3.0;
+  const alpha = 1 - Math.exp(-dtSec / colorLagTau);
+
+  // Detect rapid momentum shift for overshoot
+  const momDelta = (momentum - _prevMomentumForColor) / Math.max(dtSec, 0.001);
+  const overshoot = Math.abs(momDelta) > 0.1 ? 0.15 * Math.sign(momDelta) : 0;
+  _prevMomentumForColor = momentum;
+
+  for (let i = 0; i < 3; i++) {
+    const overTarget = targetPrimary[i] + (targetPrimary[i] - _displayPrimary[i]) * overshoot;
+    _displayPrimary[i] += (overTarget - _displayPrimary[i]) * alpha;
+
+    const overTarget2 = targetSecondary[i] + (targetSecondary[i] - _displaySecondary[i]) * overshoot;
+    _displaySecondary[i] += (overTarget2 - _displaySecondary[i]) * alpha;
+  }
+}
+
+function resetDisplayColor() {
+  _displayPrimary         = null;
+  _displaySecondary       = null;
+  _prevMomentumForColor   = 0;
+}
+
 // ─── Renderer system ─────────────────────────────────────────────────────────
 // endSettleT: 0 = normal playback, 1 = fully settled to winner color
 let endSettleT   = 0;
@@ -714,6 +762,125 @@ function resetTensionMemory() {
   _tensionEnergyTimer = 0;
 }
 
+// ─── Post-peak silence ────────────────────────────────────────────────────────
+// After a climax discharges (tension drops steeply), the system enters a brief
+// exhale — low particle count, near-silence. Then recovers slowly from center.
+let _postPeakSilence   = false;
+let _postPeakTimer     = 0;      // real ms remaining in silence
+let _postPeakRecovery  = 0;      // 0→1 during recovery phase (6-10s)
+let _prevTension       = 0;      // tension from previous frame, for drop detection
+
+function resetPostPeak() {
+  _postPeakSilence  = false;
+  _postPeakTimer    = 0;
+  _postPeakRecovery = 0;
+  _prevTension      = 0;
+}
+
+function updatePostPeak(dt) {
+  const tensionDrop = _prevTension - tensionMemory;
+
+  // Trigger: tension fell >0.3 within one frame AND is now below 0.4 — climax just exhaled
+  if (tensionDrop > 0.3 && tensionMemory < 0.4 && !_postPeakSilence && _postPeakRecovery === 0) {
+    _postPeakSilence = true;
+    _postPeakTimer   = 8000 + Math.random() * 7000;  // 8–15 real seconds
+  }
+
+  if (_postPeakSilence) {
+    _postPeakTimer -= dt;
+    if (_postPeakTimer <= 0) {
+      _postPeakSilence  = false;
+      _postPeakRecovery = 0.001;  // kick off recovery
+    }
+  }
+
+  // Recovery: 0→1 over 6–10 real seconds
+  if (_postPeakRecovery > 0 && _postPeakRecovery < 1) {
+    _postPeakRecovery = Math.min(1, _postPeakRecovery + dt / 8000);
+    if (_postPeakRecovery >= 1) _postPeakRecovery = 0;  // done recovering
+  }
+
+  _prevTension = tensionMemory;
+}
+
+// ─── Scene logic ─────────────────────────────────────────────────────────────
+// Four scene states with distinct visual + audio grammar.
+// Transitions dissolve over 4-8 real seconds via _sceneT lerp.
+const SCENE = { NEUTRAL: 0, TENSION: 1, CLIMAX: 2, AFTERMATH: 3 };
+let _currentScene = SCENE.NEUTRAL;
+let _sceneT       = 1.0;   // 0→1: blend progress from previous scene to current
+let _prevScene    = SCENE.NEUTRAL;
+
+function computeScene() {
+  if (!game) return;
+  const timeLeft   = gameDuration() - playheadSec;
+  const { h, a }   = findScore(playheadSec);
+  const margin     = Math.abs(h - a);
+  const closeGame  = margin < 5;
+  const blowout    = margin > 18;
+  const finalFour  = timeLeft < 240;
+
+  let target;
+  if (_postPeakSilence || blowout) {
+    target = SCENE.AFTERMATH;
+  } else if (finalFour && closeGame) {
+    target = SCENE.CLIMAX;
+  } else if (closeGame && tensionMemory > 0.4) {
+    target = SCENE.TENSION;
+  } else {
+    target = SCENE.NEUTRAL;
+  }
+
+  if (target !== _currentScene) {
+    _prevScene    = _currentScene;
+    _currentScene = target;
+    _sceneT       = 0;
+  }
+
+  // Dissolve: 4-8s depending on how dramatic the transition is
+  const transitionSec = (_currentScene === SCENE.CLIMAX || _currentScene === SCENE.AFTERMATH) ? 4000 : 6000;
+  if (_sceneT < 1) _sceneT = Math.min(1, _sceneT + 16.67 / transitionSec);
+}
+
+function resetScene() {
+  _currentScene = SCENE.NEUTRAL;
+  _sceneT       = 1.0;
+  _prevScene    = SCENE.NEUTRAL;
+}
+
+// Per-scene visual params: [spreadMul, desaturation, bgDarken]
+// spreadMul   — multiplier on centering force (>1 = dispersed, <1 = clustered)
+// desaturation — 0=full color, 1=grayscale
+// bgDarken    — extra canvas fill alpha added on top of base
+const _SCENE_VISUALS = {
+  [SCENE.NEUTRAL]:   { spread: 1.0,  desat: 0.0,  bgDark: 0.0  },
+  [SCENE.TENSION]:   { spread: 0.85, desat: 0.20, bgDark: 0.03 },
+  [SCENE.CLIMAX]:    { spread: 0.60, desat: 0.70, bgDark: 0.06 },
+  [SCENE.AFTERMATH]: { spread: 1.2,  desat: 0.40, bgDark: 0.0  },
+};
+
+function getSceneParams() {
+  const cur  = _SCENE_VISUALS[_currentScene];
+  const prev = _SCENE_VISUALS[_prevScene];
+  const t    = _sceneT;
+  return {
+    spread:  prev.spread  + (cur.spread  - prev.spread)  * t,
+    desat:   prev.desat   + (cur.desat   - prev.desat)   * t,
+    bgDark:  prev.bgDark  + (cur.bgDark  - prev.bgDark)  * t,
+  };
+}
+
+// Desaturate an rgb object toward gray by `amount` (0=no change, 1=full gray)
+function desaturateRgb(rgb, amount) {
+  if (amount <= 0) return rgb;
+  const gray = rgb.r * 0.299 + rgb.g * 0.587 + rgb.b * 0.114;
+  return {
+    r: Math.round(rgb.r + (gray - rgb.r) * amount),
+    g: Math.round(rgb.g + (gray - rgb.g) * amount),
+    b: Math.round(rgb.b + (gray - rgb.b) * amount),
+  };
+}
+
 // Called from checkMoments when a clutch/lead-change fires
 function noteClutchMoment() {
   const now = playheadSec;
@@ -747,6 +914,9 @@ function simulateAndGetParams(dt) {
   // Tension Memory — slow-decay dramatic weight; also charges from sustained high energy
   updateTensionMemory(rawEnergy, dt);
 
+  // Post-peak silence — detects tension discharge, manages exhale + recovery timing
+  updatePostPeak(dt);
+
   // highStakes adds a subtle persistent energy floor
   const baselineEnergy = _highStakes ? Math.max(energy, 0.35) : energy;
 
@@ -754,9 +924,14 @@ function simulateAndGetParams(dt) {
   const awayRgb  = hexToRgb(game.awayColor);
   const homeRgb2 = hexToRgb(game.homeColorSecondary);
   const awayRgb2 = hexToRgb(game.awayColorSecondary);
-  const t         = (momentum + 1) / 2;
-  const primary   = lerpColor(homeRgb,  awayRgb,  t);
-  const secondary = lerpColor(homeRgb2, awayRgb2, t);
+  const t              = (momentum + 1) / 2;
+  const targetPrimary  = lerpColor(homeRgb,  awayRgb,  t);
+  const targetSecondary = lerpColor(homeRgb2, awayRgb2, t);
+
+  // Color gradient lag: _displayPrimary trails the target at τ=3s with overshoot
+  updateDisplayColor(targetPrimary, targetSecondary, momentum, dt);
+  const primary   = _displayPrimary   ? _displayPrimary.map(Math.round)   : targetPrimary;
+  const secondary = _displaySecondary ? _displaySecondary.map(Math.round) : targetSecondary;
 
   // Gravity: direction shifts toward the leading team's side of the canvas
   // momentum > 0 → away team leads → pull rightward; < 0 → home → leftward
@@ -767,7 +942,16 @@ function simulateAndGetParams(dt) {
   const deadSpaceFloor = Math.round(80 + tensionMemory * 80);
   // Rare overload: when aftershock is saturated (>1.2) briefly allow up to 1800 particles
   const overloadCap = _aftershockPool > 1.2 ? 1800 : 1000;
-  const activeCount = Math.min(overloadCap, Math.max(deadSpaceFloor, Math.round(150 + baselineEnergy * 850)));
+  let activeCount = Math.min(overloadCap, Math.max(deadSpaceFloor, Math.round(150 + baselineEnergy * 850)));
+
+  // Post-peak silence overrides: drop to 40-60 particles; recovery re-emerges from 40→normal
+  if (_postPeakSilence) {
+    activeCount = Math.round(40 + Math.random() * 20);
+  } else if (_postPeakRecovery > 0) {
+    const recoveryTarget = Math.min(overloadCap, Math.max(deadSpaceFloor, Math.round(150 + baselineEnergy * 850)));
+    activeCount = Math.round(40 + _postPeakRecovery * (recoveryTarget - 40));
+  }
+
   const maxSpeed    = 1.5 + baselineEnergy * 4;
 
   for (let i = 0; i < POOL_SIZE; i++) {
@@ -783,11 +967,40 @@ function simulateAndGetParams(dt) {
     const isTrailing = (momentum > 0 && pSide < 0) || (momentum < 0 && pSide > 0);
     const damping = isTrailing ? 0.97 : 1.0;  // trailing side drags
 
-    p.vx = p.vx * damping + gravX * 0.04 + (Math.random() - 0.5) * 0.25 * baselineEnergy;
-    p.vy = p.vy * damping + gravY * 0.04 + (Math.random() - 0.5) * 0.25 * baselineEnergy;
-    // Soft centering force
-    p.vx += (W / 2 - p.x) * 0.0003;
-    p.vy += (H / 2 - p.y) * 0.0003;
+    // During silence particles drift toward zero — exhale, barely moving
+    // During recovery they re-emerge from center with growing influence
+    const silenceScale  = _postPeakSilence ? 0.0 : (_postPeakRecovery > 0 ? _postPeakRecovery : 1.0);
+    const recoveryCentering = _postPeakRecovery > 0 ? (1 - _postPeakRecovery) * 0.004 : 0;
+
+    // Direction resistance: velocity heading rotates toward gravity target at a
+    // capped rate — trailing particles are heavier and turn more slowly.
+    const dtSec = dt / 1000;
+    const spd0  = Math.hypot(p.vx, p.vy);
+    if (spd0 > 0.01 && (gravX !== 0 || gravY !== 0)) {
+      const targetAngle  = Math.atan2(gravY, gravX);
+      const currentAngle = Math.atan2(p.vy, p.vx);
+      const maxTurn      = (isTrailing ? 0.8 : 2.0) * dtSec * silenceScale;
+      const turn         = clampAngle(targetAngle - currentAngle, maxTurn);
+      const cos = Math.cos(turn), sin = Math.sin(turn);
+      const nvx = p.vx * cos - p.vy * sin;
+      const nvy = p.vx * sin + p.vy * cos;
+      p.vx = nvx;
+      p.vy = nvy;
+    }
+
+    p.vx = p.vx * (damping * (0.92 + silenceScale * 0.08))
+         + (Math.random() - 0.5) * 0.25 * baselineEnergy * silenceScale
+         - p.vx * (1 - silenceScale) * 0.05;
+    p.vy = p.vy * (damping * (0.92 + silenceScale * 0.08))
+         + (Math.random() - 0.5) * 0.25 * baselineEnergy * silenceScale
+         - p.vy * (1 - silenceScale) * 0.05;
+    // Pull toward center during recovery
+    p.vx += (W / 2 - p.x) * recoveryCentering;
+    p.vy += (H / 2 - p.y) * recoveryCentering;
+    // Soft centering force — scene spread inverts it (CLIMAX clusters, AFTERMATH disperses)
+    const sceneCenter = 0.0003 / Math.max(0.3, getSceneParams().spread);
+    p.vx += (W / 2 - p.x) * sceneCenter;
+    p.vy += (H / 2 - p.y) * sceneCenter;
 
     const spd = Math.hypot(p.vx, p.vy);
     if (spd > maxSpeed) { p.vx = p.vx / spd * maxSpeed; p.vy = p.vy / spd * maxSpeed; }
@@ -802,7 +1015,8 @@ function simulateAndGetParams(dt) {
     if (p.y > H+20) p.y = -20;
   }
 
-  return { momentum, energy: baselineEnergy, rawEnergy, primary, secondary, activeCount, tensionMemory };
+  return { momentum, energy: baselineEnergy, rawEnergy, primary, secondary, activeCount, tensionMemory,
+           postPeakSilence: _postPeakSilence, postPeakRecovery: _postPeakRecovery };
 }
 
 // ─── Per-mode signal shaping ─────────────────────────────────────────────────
@@ -846,16 +1060,20 @@ function drawMinimal(dt) {
   const raw = simulateAndGetParams(dt);
   // Minimal: slow-response shaped energy for all drawing — physics already ran with real values
   const shaped  = shapeMinimal(raw.energy, raw.momentum, dt);
-  const { primary, secondary, activeCount } = raw;
+  const { activeCount } = raw;
   const energy  = shaped.energy;
+  const sp      = getSceneParams();
+  const primary   = desaturateRgb(raw.primary,   sp.desat);
+  const secondary = desaturateRgb(raw.secondary, sp.desat);
 
-  ctx.fillStyle = `rgba(0,0,0,${0.18 - energy * 0.05 + raw.tensionMemory * 0.05})`;
+  ctx.fillStyle = `rgba(0,0,0,${0.18 - energy * 0.05 + raw.tensionMemory * 0.05 + sp.bgDark})`;
   ctx.fillRect(0, 0, W, H);
 
-  if (energy > 0.15) {
+  if (energy > 0.15 && !raw.postPeakSilence) {
+    const glowScale = raw.postPeakRecovery > 0 ? raw.postPeakRecovery : 1;
     const r   = Math.min(W, H) * 0.55;
     const grd = ctx.createRadialGradient(W/2, H/2, 0, W/2, H/2, r);
-    grd.addColorStop(0, rgbStr(primary, energy * 0.07));
+    grd.addColorStop(0, rgbStr(primary, energy * 0.07 * glowScale));
     grd.addColorStop(1, 'rgba(0,0,0,0)');
     ctx.fillStyle = grd;
     ctx.fillRect(0, 0, W, H);
@@ -910,9 +1128,12 @@ function drawAnime(dt) {
 
   const raw    = simulateAndGetParams(dt);
   const shaped = shapeAnime(raw.energy, raw.momentum, dt);
-  const { primary, secondary, activeCount } = raw;
+  const { activeCount } = raw;
   const energy   = shaped.energy;
   const momentum = shaped.momentum;
+  const sp        = getSceneParams();
+  const primary   = desaturateRgb(raw.primary,   sp.desat);
+  const secondary = desaturateRgb(raw.secondary, sp.desat);
 
   // Advance shake
   if (shakeTtl > 0) {
@@ -936,14 +1157,15 @@ function drawAnime(dt) {
   ctx.translate(shakeX, shakeY);
 
   // Dark trail fade — less transparent than minimal so trails burn in harder
-  ctx.fillStyle = `rgba(0,0,0,${0.12 - energy * 0.04 + raw.tensionMemory * 0.05})`;
+  ctx.fillStyle = `rgba(0,0,0,${0.12 - energy * 0.04 + raw.tensionMemory * 0.05 + sp.bgDark})`;
   ctx.fillRect(-20, -20, W + 40, H + 40);
 
-  // Vivid central glow
-  if (energy > 0.1) {
+  // Vivid central glow — suppressed during post-peak silence
+  if (energy > 0.1 && !raw.postPeakSilence) {
+    const glowScale = raw.postPeakRecovery > 0 ? raw.postPeakRecovery : 1;
     const r   = Math.min(W, H) * 0.7;
     const grd = ctx.createRadialGradient(W/2, H/2, 0, W/2, H/2, r);
-    grd.addColorStop(0, rgbStr(primary, energy * 0.14));
+    grd.addColorStop(0, rgbStr(primary, energy * 0.14 * glowScale));
     grd.addColorStop(1, 'rgba(0,0,0,0)');
     ctx.fillStyle = grd;
     ctx.fillRect(-20, -20, W + 40, H + 40);
@@ -1137,6 +1359,7 @@ function buildTimeline() {
 
 // ─── Audio ────────────────────────────────────────────────────────────────────
 // Four independent layers: ambient, momentum-tonality, chaos, clutch.
+let _chaosTail = 0;  // independent decay tail so chaos noise lingers after toBurst drops
 let _master, _conv, _duck;
 let _drones;                    // ambient layer oscillators
 let _heartbeat, _heartGain;     // clutch layer heartbeat
@@ -1417,26 +1640,54 @@ function updateAudio() {
   const toBurst  = game.toBurst ? sampleAt(game.toBurst, playheadSec) : 0;
   const timeLeft = gameDuration() - playheadSec;
 
-  // ── Master volume ───────────────────────────────────────────────
-  _master.gain.linearRampToValueAtTime(playing ? 0.15 + energy * 0.3 : 0, now + 0.5);
+  // ── Post-peak silence: override volumes for exhale + recovery ──
+  // silenceGain: 0.3 during silence (drones only), ramps to 1 during recovery
+  const silenceGain     = _postPeakSilence ? 0.3 : (_postPeakRecovery > 0 ? 0.3 + _postPeakRecovery * 0.7 : 1.0);
+  const silenceLayerMul = _postPeakSilence ? 0.0 : (_postPeakRecovery > 0 ? _postPeakRecovery : 1.0);
 
-  // ── Layer 1: Ambient — filter opens with energy, always audible ─
+  // ── Scene audio grammar — layer multipliers per scene state ────
+  // Blended across the same _sceneT as visuals.
+  const _SA = [
+    { drone: 1.0, chaos: 1.0, droneFilter: 1.0 },  // NEUTRAL
+    { drone: 1.0, chaos: 1.5, droneFilter: 1.3 },  // TENSION  — chaos prominent, filter opens
+    { drone: 0.3, chaos: 0.5, droneFilter: 0.6 },  // CLIMAX   — drones near-muted, compressor dominates
+    { drone: 1.0, chaos: 0.0, droneFilter: 0.5 },  // AFTERMATH — ambient only, no chaos
+  ];
+  const saPrev = _SA[_prevScene];
+  const saCur  = _SA[_currentScene];
+  const saT    = _sceneT;
+  const scDrone      = saPrev.drone      + (saCur.drone      - saPrev.drone)      * saT;
+  const scChaos      = saPrev.chaos      + (saCur.chaos      - saPrev.chaos)      * saT;
+  const scDroneFilter = saPrev.droneFilter + (saCur.droneFilter - saPrev.droneFilter) * saT;
+
+  // ── Master volume ───────────────────────────────────────────────
+  _master.gain.linearRampToValueAtTime(playing ? (0.15 + energy * 0.3) * silenceGain : 0, now + 0.5);
+
+  // ── Layer 1: Ambient — filter opens with energy + scene modifier ─
   _drones.forEach((d, i) => {
-    d.filt.frequency.linearRampToValueAtTime(120 + energy * 900 + i * 60, now + 1);
+    d.filt.frequency.linearRampToValueAtTime((120 + energy * 900 + i * 60) * scDroneFilter, now + 1);
   });
 
-  // ── Layer 2: Momentum tonality — chord voicing shifts ──────────
+  // ── Layer 2: Momentum tonality — chord voicing + scene drone gain ─
   // home dominant → minor (darker); tied → suspended; away → major
   const tonality = momentum < -0.2 ? 'minor' : momentum > 0.2 ? 'major' : 'suspended';
   const targetCents = TONALITY[tonality];
   _drones.forEach((d, i) => {
     d.osc.detune.linearRampToValueAtTime(targetCents[i], now + 3);
+    const baseDroneGain = 0.04 - i * 0.008;
+    d.gain.gain.linearRampToValueAtTime(baseDroneGain * scDrone * silenceGain, now + 4);
   });
 
-  // ── Layer 3: Chaos — turnover burst gates noise ─────────────────
+  // ── Layer 3: Chaos — turnover burst gates noise, with 2s independent tail ─
   if (_chaosGain) {
-    const chaosVol = toBurst > 0.3 ? (toBurst - 0.3) / 0.7 * 0.06 : 0;
-    _chaosGain.gain.linearRampToValueAtTime(playing ? chaosVol : 0, now + 0.2);
+    const dtSecAudio = 1 / 60;  // audio runs every frame at ~60fps
+    if (toBurst > 0.5) _chaosTail = Math.max(_chaosTail, toBurst);
+    _chaosTail *= Math.exp(-dtSecAudio / 2.0);  // τ=2s decay
+    const chaosVol = Math.max(
+      toBurst > 0.3 ? (toBurst - 0.3) / 0.7 * 0.06 : 0,
+      _chaosTail * 0.06
+    );
+    _chaosGain.gain.linearRampToValueAtTime(playing ? chaosVol * scChaos * silenceLayerMul : 0, now + 0.2);
   }
 
   // ── Layer 4: Clutch — insert compressor + heartbeat in final 4 min ─
@@ -1460,11 +1711,11 @@ function updateAudio() {
     _clutchComp.ratio.value     =   6 + tensionMemory * 4;  //   6 → 10
   }
 
-  if (clutchActive) {
+  if (clutchActive && silenceLayerMul > 0) {
     const bpm      = 60 + (1 - timeLeft / 240) * 30;
     const interval = 60 / bpm;
     const beatPhase = (now % interval) / interval;
-    const vol = 0.08 + energy * 0.12;
+    const vol = (0.08 + energy * 0.12) * silenceLayerMul;
     if (beatPhase < 0.05) {
       _heartGain.gain.cancelScheduledValues(now);
       _heartGain.gain.setValueAtTime(vol, now);
@@ -1498,6 +1749,7 @@ function tick(ts) {
     }
   }
 
+  if (game && !endShown) computeScene();
   renderFrame(dt);
   if (!endShown) { updateScoreUI(); checkMoments(); }
   updateAudio();
@@ -1512,6 +1764,10 @@ function seek(sec) {
   resetCrowdHeat();
   resetStateMemory();
   resetTensionMemory();
+  resetPostPeak();
+  resetScene();
+  resetDisplayColor();
+  _chaosTail = 0;
   _minEnvEnergy = 0; _minEnvMomentum = 0;
   _animeFreeze  = 0;
   _bcDiscreteEnergy = 0; _bcDiscreteMomentum = 0; _bcLastEventT = -1;
@@ -1881,21 +2137,25 @@ function drawBroadcast(dt) {
   const raw    = simulateAndGetParams(dt);
   // Broadcast: discrete updates — visuals only shift on scoring events, not every frame
   const shaped = shapeBroadcast(raw.energy, raw.momentum);
-  const { primary, secondary, activeCount } = raw;
+  const { activeCount } = raw;
   const energy = shaped.energy;
+  const sp      = getSceneParams();
+  const primary   = desaturateRgb(raw.primary,   sp.desat);
+  const secondary = desaturateRgb(raw.secondary, sp.desat);
 
   // Reduced particle density (50% of normal) — data layer is the visual here
   const bcCount = Math.floor(activeCount * 0.5);
 
   // Slightly lighter trail fade than minimal so background stays legible
-  ctx.fillStyle = `rgba(8,12,28,${0.22 - energy * 0.06 + raw.tensionMemory * 0.05})`;
+  ctx.fillStyle = `rgba(8,12,28,${0.22 - energy * 0.06 + raw.tensionMemory * 0.05 + sp.bgDark})`;
   ctx.fillRect(0, 0, W, H);
 
-  // Subtle central glow
-  if (energy > 0.1) {
+  // Subtle central glow — suppressed during post-peak silence
+  if (energy > 0.1 && !raw.postPeakSilence) {
+    const glowScale = raw.postPeakRecovery > 0 ? raw.postPeakRecovery : 1;
     const r   = Math.min(W, H) * 0.6;
     const grd = ctx.createRadialGradient(W/2, H/2, 0, W/2, H/2, r);
-    grd.addColorStop(0, rgbStr(primary, energy * 0.06));
+    grd.addColorStop(0, rgbStr(primary, energy * 0.06 * glowScale));
     grd.addColorStop(1, 'rgba(0,0,0,0)');
     ctx.fillStyle = grd;
     ctx.fillRect(0, 0, W, H);
