@@ -762,6 +762,81 @@ function resetTensionMemory() {
   _tensionEnergyTimer = 0;
 }
 
+// ─── Director moments ─────────────────────────────────────────────────────────
+// Rare, system-triggered interruptions lasting 3-8 real seconds.
+// At most one per 90 real seconds. Four types:
+//   time_dilation       — clutch_shot, final 90s, margin ≤ 3
+//   gravitational_collapse — run_start, 10+ unanswered, tensionMemory > 0.6 (Cosmic only)
+//   bass_drop           — lead_change, final 2 min (Anime + Broadcast)
+//   exhale              — postPeakSilence trigger (all modes)
+let _lastDirectorAt    = -999999;   // real ms timestamp of last director moment
+let _dilationTimer     = 0;         // ms remaining at 30% physics speed
+let _dilationRelease   = 0;         // ms remaining in 1s snap-back phase
+let _freezeFrames      = 0;         // physics frames to skip (bass drop freeze)
+let _freezeBoost       = 0;         // 0→1 boost applied to particle velocities post-freeze; decays over 3s
+let _collapseActive    = false;
+let _collapseTimer     = 0;         // ms remaining in gravitational collapse
+let _collapsePhase     = 0;         // 0=lurch-in, 1=explode-out
+
+function resetDirector() {
+  _lastDirectorAt  = -999999;
+  _dilationTimer   = 0;
+  _dilationRelease = 0;
+  _freezeFrames    = 0;
+  _freezeBoost     = 0;
+  _collapseActive  = false;
+  _collapseTimer   = 0;
+  _collapsePhase   = 0;
+}
+
+function triggerDirectorMoment(type) {
+  const nowMs = performance.now();
+  if (nowMs - _lastDirectorAt < 90000) return;  // 90s cooldown
+  _lastDirectorAt = nowMs;
+
+  if (type === 'time_dilation' && currentMode !== 'cosmic') {
+    _dilationTimer   = 4000;
+    _dilationRelease = 0;
+    // Pitch drones down 8% then recover
+    if (audioCtx && _drones) {
+      const now = audioCtx.currentTime;
+      _drones.forEach(d => {
+        d.osc.frequency.cancelScheduledValues(now);
+        d.osc.frequency.setValueAtTime(d.osc.frequency.value, now);
+        d.osc.frequency.exponentialRampToValueAtTime(d.baseFreq * 0.92, now + 0.3);
+        d.osc.frequency.exponentialRampToValueAtTime(d.baseFreq,        now + 5.0);
+      });
+    }
+  }
+
+  if (type === 'gravitational_collapse' && currentMode === 'cosmic') {
+    _collapseActive = true;
+    _collapseTimer  = 3000;
+    _collapsePhase  = 0;
+  }
+
+  if (type === 'bass_drop' && (currentMode === 'anime' || currentMode === 'broadcast')) {
+    _freezeFrames = 2;
+    _freezeBoost  = 1.0;
+    fireBassThump();
+  }
+
+  // exhale: no extra state needed — _postPeakSilence already does the work.
+  // The director tag just enforces the 90s cooldown so it doesn't stack.
+}
+
+function fireBassThump() {
+  if (!audioCtx) return;
+  const now  = audioCtx.currentTime;
+  const osc  = audioCtx.createOscillator();
+  const gain = audioCtx.createGain();
+  osc.type = 'sine'; osc.frequency.value = 40;
+  gain.gain.setValueAtTime(0.4, now);
+  gain.gain.exponentialRampToValueAtTime(0.001, now + 0.15);
+  osc.connect(gain); gain.connect(_master);
+  osc.start(now); osc.stop(now + 0.2);
+}
+
 // ─── Post-peak silence ────────────────────────────────────────────────────────
 // After a climax discharges (tension drops steeply), the system enters a brief
 // exhale — low particle count, near-silence. Then recovers slowly from center.
@@ -784,6 +859,7 @@ function updatePostPeak(dt) {
   if (tensionDrop > 0.3 && tensionMemory < 0.4 && !_postPeakSilence && _postPeakRecovery === 0) {
     _postPeakSilence = true;
     _postPeakTimer   = 8000 + Math.random() * 7000;  // 8–15 real seconds
+    triggerDirectorMoment('exhale');
   }
 
   if (_postPeakSilence) {
@@ -904,18 +980,57 @@ function simulateAndGetParams(dt) {
     rawEnergy   = rawEnergy   * (1 - endSettleT * 0.6);
   }
 
+  // Director: advance dilation timer; compute effective dt for physics
+  let physicsDt = dt;
+  if (_freezeFrames > 0) {
+    _freezeFrames--;
+    // On the frame freeze ends, double all particle velocities
+    if (_freezeFrames === 0) {
+      for (let i = 0; i < POOL_SIZE; i++) { pool[i].vx *= 2; pool[i].vy *= 2; }
+    }
+    // Skip physics this frame — particles are frozen
+    updateStateMemory(rawMomentum, dt);
+    updateCrowdHeat(rawEnergy, dt);
+    updateTensionMemory(rawEnergy, dt);
+    updatePostPeak(dt);
+    const tP = (rawMomentum + 1) / 2;
+    const tgtP = lerpColor(hexToRgb(game.homeColor), hexToRgb(game.awayColor), tP);
+    const tgtS = lerpColor(hexToRgb(game.homeColorSecondary), hexToRgb(game.awayColorSecondary), tP);
+    updateDisplayColor(tgtP, tgtS, rawMomentum, dt);
+    const pr = _displayPrimary ? _displayPrimary.map(Math.round) : tgtP;
+    const sc = _displaySecondary ? _displaySecondary.map(Math.round) : tgtS;
+    const ac = Math.min(1000, Math.max(80, Math.round(150 + rawEnergy * 850)));
+    return { momentum: rawMomentum, energy: rawEnergy, rawEnergy, primary: pr, secondary: sc,
+             activeCount: ac, tensionMemory, postPeakSilence: _postPeakSilence, postPeakRecovery: _postPeakRecovery };
+  }
+  if (_dilationTimer > 0) {
+    _dilationTimer -= dt;
+    if (_dilationTimer <= 0) { _dilationTimer = 0; _dilationRelease = 1000; }
+    physicsDt = dt * 0.3;
+  } else if (_dilationRelease > 0) {
+    _dilationRelease -= dt;
+    // Ease physics speed from 30% back to 100% over 1s
+    const easeT  = Math.max(0, _dilationRelease / 1000);
+    physicsDt    = dt * (0.3 + 0.7 * (1 - easeT));
+    if (_dilationRelease <= 0) _dilationRelease = 0;
+  }
+  // Freeze-boost decays: particles gradually return to normal speed over 3s
+  if (_freezeBoost > 0) {
+    _freezeBoost = Math.max(0, _freezeBoost - dt / 3000);
+  }
+
   // State memory — updates _effectiveMomentum
-  updateStateMemory(rawMomentum, dt);
+  updateStateMemory(rawMomentum, physicsDt);
   const momentum = _effectiveMomentum;
 
   // Crowd Heat — effectiveEnergy with aftershock + hysteresis
-  const energy = updateCrowdHeat(rawEnergy, dt);
+  const energy = updateCrowdHeat(rawEnergy, physicsDt);
 
   // Tension Memory — slow-decay dramatic weight; also charges from sustained high energy
-  updateTensionMemory(rawEnergy, dt);
+  updateTensionMemory(rawEnergy, physicsDt);
 
   // Post-peak silence — detects tension discharge, manages exhale + recovery timing
-  updatePostPeak(dt);
+  updatePostPeak(physicsDt);
 
   // highStakes adds a subtle persistent energy floor
   const baselineEnergy = _highStakes ? Math.max(energy, 0.35) : energy;
@@ -974,7 +1089,7 @@ function simulateAndGetParams(dt) {
 
     // Direction resistance: velocity heading rotates toward gravity target at a
     // capped rate — trailing particles are heavier and turn more slowly.
-    const dtSec = dt / 1000;
+    const dtSec = physicsDt / 1000;
     const spd0  = Math.hypot(p.vx, p.vy);
     if (spd0 > 0.01 && (gravX !== 0 || gravY !== 0)) {
       const targetAngle  = Math.atan2(gravY, gravX);
@@ -1005,9 +1120,15 @@ function simulateAndGetParams(dt) {
     const spd = Math.hypot(p.vx, p.vy);
     if (spd > maxSpeed) { p.vx = p.vx / spd * maxSpeed; p.vy = p.vy / spd * maxSpeed; }
 
-    p.x += p.vx * dt / 16.67;
-    p.y += p.vy * dt / 16.67;
-    p.life += 0.005 * dt / 16.67;
+    // Freeze-boost: damp velocity back toward normal over 3s after bass drop
+    if (_freezeBoost > 0) {
+      p.vx *= (1 - _freezeBoost * 0.02);
+      p.vy *= (1 - _freezeBoost * 0.02);
+    }
+
+    p.x += p.vx * physicsDt / 16.67;
+    p.y += p.vy * physicsDt / 16.67;
+    p.life += 0.005 * physicsDt / 16.67;
 
     if (p.x < -20) p.x = W + 20;
     if (p.x > W+20) p.x = -20;
@@ -1630,6 +1751,18 @@ function fireMomentAudio(km) {
       triggerCosmicWave(0.4);
     }
   }
+
+  // Director moments — evaluated after mode-specific effects
+  if (km.type === 'clutch_shot') {
+    const { h, a } = findScore(playheadSec);
+    const timeLeft = gameDuration() - playheadSec;
+    if (timeLeft < 90 && Math.abs(h - a) <= 3) triggerDirectorMoment('time_dilation');
+  } else if (km.type === 'run_start') {
+    const runPts = parseInt(km.label) || 0;  // label is e.g. "8-0 run"
+    if (runPts >= 10 && tensionMemory > 0.6)  triggerDirectorMoment('gravitational_collapse');
+  } else if (km.type === 'lead_change') {
+    if (gameDuration() - playheadSec < 120)   triggerDirectorMoment('bass_drop');
+  }
 }
 
 function updateAudio() {
@@ -1766,6 +1899,7 @@ function seek(sec) {
   resetTensionMemory();
   resetPostPeak();
   resetScene();
+  resetDirector();
   resetDisplayColor();
   _chaosTail = 0;
   _minEnvEnergy = 0; _minEnvMomentum = 0;
@@ -2082,8 +2216,40 @@ function drawCosmic(dt) {
   mat.uniforms.homePos.value.set(homeSignedX,  arcY, 0);
   mat.uniforms.awayPos.value.set(awaySignedX, -arcY, 0);
 
+  // ── Gravitational collapse director moment ───────────────────────
+  if (_collapseActive) {
+    _collapseTimer -= dt;
+    if (_collapseTimer <= 0) {
+      if (_collapsePhase === 0) {
+        // Switch to explode-out phase
+        _collapsePhase = 1;
+        _collapseTimer = 1500;
+        triggerCosmicWave(1.0);  // big outward wave
+      } else {
+        _collapseActive = false;
+        geo.attributes.position.array.set(basePos);
+        geo.attributes.position.needsUpdate = true;
+      }
+    }
+    if (_collapseActive) {
+      const dominantX = momentum > 0 ? 80 : -80;  // dominant nebula center
+      const collapseT = _collapsePhase === 0
+        ? 1 - (_collapseTimer / 1500)   // 0→1 lurch in
+        : _collapseTimer / 1500;        // 1→0 explode out
+      const pos = geo.attributes.position.array;
+      const n   = pos.length / 3;
+      for (let i = 0; i < n; i++) {
+        const bx = basePos[i*3], by = basePos[i*3+1], bz = basePos[i*3+2];
+        pos[i*3]   = bx + (dominantX - bx) * collapseT * 0.6;
+        pos[i*3+1] = by * (1 - collapseT * 0.5);
+        pos[i*3+2] = bz * (1 - collapseT * 0.5);
+      }
+      geo.attributes.position.needsUpdate = true;
+    }
+  }
+
   // ── Update star positions for gravitational wave ──────────────────
-  const waveActive = _cosmicWave > 0.005;
+  const waveActive = _cosmicWave > 0.005 && !_collapseActive;
   if (waveActive !== _three.waveWasActive) {
     // State transition: always update on change
     _three.waveWasActive = waveActive;
