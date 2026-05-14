@@ -225,6 +225,13 @@ canvas { display: block; }
   border-radius: 4px;
   overflow: hidden;
   box-shadow: 0 2px 16px rgba(0,0,0,0.7);
+  outline: 2px solid transparent;
+  transition: outline-color 0.08s ease, box-shadow 0.08s ease;
+}
+#bc-score-bug.pulse {
+  outline-color: #fff;
+  box-shadow: 0 2px 24px rgba(255,255,255,0.35);
+  transition: outline-color 0s, box-shadow 0s;
 }
 .bc-team-block {
   display: flex;
@@ -1086,6 +1093,25 @@ function simulateAndGetParams(dt) {
 
   const maxSpeed    = 1.5 + baselineEnergy * 4;
 
+  // Free-throw ritual: advance timer, compute velocity damp scale (0.2 during damp, 1 after)
+  let ftDampScale = 1.0;
+  let ftCenterForce = 0;
+  if (_ftRitualPhase === 1) {
+    _ftRitualTimer -= dt;
+    ftDampScale = 0.2;
+    if (_ftRitualTimer <= 0) { _ftRitualPhase = 2; _ftRitualTimer = 2000; }
+  } else if (_ftRitualPhase === 2) {
+    _ftRitualTimer -= dt;
+    ftDampScale = 0.2 + 0.8 * (1 - _ftRitualTimer / 2000);  // ramp back to 1 over 2s
+    if (_ftRitualTimer <= 0) _ftRitualPhase = 0;
+  }
+
+  // Timeout drift: pull particles toward center over 3s
+  if (_timeoutDrift > 0) {
+    _timeoutDrift -= dt;
+    ftCenterForce = 0.003 * Math.max(0, _timeoutDrift / 3000);
+  }
+
   for (let i = 0; i < POOL_SIZE; i++) {
     const p = pool[i];
     const maxTrail = currentMode === 'anime' ? Math.round(6 + baselineEnergy * 22) : Math.round(2 + baselineEnergy * 6);
@@ -1120,15 +1146,15 @@ function simulateAndGetParams(dt) {
       p.vy = nvy;
     }
 
-    p.vx = p.vx * (damping * (0.92 + silenceScale * 0.08))
+    p.vx = p.vx * (damping * (0.92 + silenceScale * 0.08)) * ftDampScale
          + (Math.random() - 0.5) * 0.25 * baselineEnergy * silenceScale
          - p.vx * (1 - silenceScale) * 0.05;
-    p.vy = p.vy * (damping * (0.92 + silenceScale * 0.08))
+    p.vy = p.vy * (damping * (0.92 + silenceScale * 0.08)) * ftDampScale
          + (Math.random() - 0.5) * 0.25 * baselineEnergy * silenceScale
          - p.vy * (1 - silenceScale) * 0.05;
-    // Pull toward center during recovery
-    p.vx += (W / 2 - p.x) * recoveryCentering;
-    p.vy += (H / 2 - p.y) * recoveryCentering;
+    // Pull toward center during recovery or timeout drift
+    p.vx += (W / 2 - p.x) * (recoveryCentering + ftCenterForce);
+    p.vy += (H / 2 - p.y) * (recoveryCentering + ftCenterForce);
     // Soft centering force — scene spread inverts it (CLIMAX clusters, AFTERMATH disperses)
     const sceneCenter = 0.0003 / Math.max(0.3, getSceneParams().spread);
     p.vx += (W / 2 - p.x) * sceneCenter;
@@ -1512,15 +1538,21 @@ let _master, _conv, _duck;
 let _drones;                    // ambient layer oscillators
 let _heartbeat, _heartGain;     // clutch layer heartbeat
 let _chaosGain, _chaosNoise;    // chaos layer
+let _tremoloLFO, _tremoloGain;  // chaos tremolo: 5Hz LFO gated on toBurst > 0.4
 let _clutchComp;                // clutch compressor (inserted when final 4 min)
 let _compActive = false;
 let _lastDroneModT = 0;
+let _ftSilenceTimer = 0;        // ms remaining of post-free-throw chaos silence
 
-// Minor/major/suspended voicings (cent offsets per drone) keyed by tonality
-const TONALITY = {
-  minor:     [ -14,  10, -14,  10],   // home dominant — darker
-  suspended: [   0,   0,   0,   0],   // tied
-  major:     [  14, -10,  14, -10],   // away dominant — brighter
+// Chord voicings as frequency ratios relative to each drone's base frequency.
+// Four drones: 55Hz, 82.4Hz, 110Hz, 164.8Hz
+// Ratios produce actual harmonic intervals rather than microtonal detune.
+const VOICINGS = {
+  home_dominant:  [1.000, 1.498, 1.189, 1.498],  // root, fifth, minor third, fifth
+  tied_contested: [1.000, 1.498, 1.335, 1.782],  // suspended — unresolved
+  away_dominant:  [1.000, 1.498, 1.260, 1.587],  // root, fifth, major third, minor seventh
+  climax:         [1.000, 1.122, 1.498, 1.782],  // compressed — everything close together
+  aftermath:      [1.000, 2.000, 1.498, 3.000],  // open fifths — spacious, hollow
 };
 
 function initAudio() {
@@ -1583,6 +1615,19 @@ function initAudio() {
   _chaosGain.gain.value = 0;
   _chaosNoise.connect(chaosFilt); chaosFilt.connect(_chaosGain); _chaosGain.connect(_duck);
   _chaosNoise.start();
+
+  // ── Chaos tremolo LFO (4-6Hz nervous rhythm on high toBurst) ────
+  // LFO modulates a gain node inserted between chaosGain and duck.
+  // When toBurst > 0.4 the tremolo depth ramps up — crowd's nervous pulse.
+  _tremoloLFO  = audioCtx.createOscillator();
+  _tremoloGain = audioCtx.createGain();
+  _tremoloLFO.type = 'sine';
+  _tremoloLFO.frequency.value = 5;
+  _tremoloGain.gain.value = 0;  // depth starts at 0; driven in updateAudio
+  _tremoloLFO.connect(_tremoloGain);
+  // LFO modulates chaosGain's gain param directly
+  _tremoloGain.connect(_chaosGain.gain);
+  _tremoloLFO.start();
 
   // ── Layer 4: Clutch compressor (final 4 min) ─────────────────────
   // Inserted between duck and master when clutch time begins.
@@ -1711,6 +1756,12 @@ function fireEventAudio(evt) {
     if (audioCtx && playing) fireTransient(0.05 + energy * 0.06);
     if (currentMode === 'anime') { triggerShake(0.3); triggerFlash(0.15); }
     if (currentMode === 'cosmic') triggerCosmicWave(0.25);
+  } else if (evt.type === 'free_throw') {
+    // Free throw ritual: damp particle velocities to 20%, silence chaos, then resume
+    if (currentMode === 'broadcast' || currentMode === 'minimal') {
+      _ftRitualTimer = 1000;
+      _ftRitualPhase = 1;
+    }
   } else if (evt.type === 'timeout') {
     if (audioCtx && playing && _duck) {
       const now = audioCtx.currentTime;
@@ -1719,6 +1770,8 @@ function fireEventAudio(evt) {
       _duck.gain.linearRampToValueAtTime(0.1, now + 0.3);
       _duck.gain.linearRampToValueAtTime(1.0, now + 3.5);
     }
+    // Timeout particle drift to center over 3s
+    _timeoutDrift = 3000;
   }
 }
 
@@ -1744,6 +1797,19 @@ function fireMomentAudio(km) {
       }
     } else if (km.type === 'run_start') {
       fireSwell(0.08 + km.intensity * 0.1);
+    } else if (km.type === 'free_throw_miss') {
+      // Descending pluck: 200Hz falling 30% to 140Hz over 200ms, then 800ms chaos silence
+      const now = audioCtx.currentTime;
+      const osc  = audioCtx.createOscillator();
+      const gain = audioCtx.createGain();
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(200, now);
+      osc.frequency.exponentialRampToValueAtTime(140, now + 0.2);
+      gain.gain.setValueAtTime(0.12, now);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.5);
+      osc.connect(gain); gain.connect(_master); gain.connect(_conv);
+      osc.start(now); osc.stop(now + 0.55);
+      _ftSilenceTimer = 800;  // suppress chaos layer for 800ms
     }
   }
 
@@ -1767,6 +1833,21 @@ function fireMomentAudio(km) {
       showChyron('Three!', '#ffaa00');
     } else if (km.type === 'timeout') {
       showChyron('Timeout', '#666');
+    }
+  }
+
+  // Broadcast visual effects for key moments
+  if (currentMode === 'broadcast') {
+    _bcDimTimer = 500;  // canvas dim for 500ms
+    if (km.type === 'lead_change') {
+      // Score bug pulse: flash border in leading team color for 800ms
+      const { h, a } = findScore(playheadSec);
+      const pulseColor = h > a ? game.homeColor : game.awayColor;
+      const bug = document.getElementById('bc-score-bug');
+      bug.style.outlineColor = pulseColor;
+      bug.classList.add('pulse');
+      setTimeout(() => bug.classList.remove('pulse'), 80);  // let transition take over
+      _bcScorebugPulse = { timer: 800 };
     }
   }
 
@@ -1829,26 +1910,54 @@ function updateAudio() {
     d.filt.frequency.linearRampToValueAtTime((120 + energy * 900 + i * 60) * scDroneFilter, now + 1);
   });
 
-  // ── Layer 2: Momentum tonality — chord voicing + scene drone gain ─
-  // home dominant → minor (darker); tied → suspended; away → major
-  const tonality = momentum < -0.2 ? 'minor' : momentum > 0.2 ? 'major' : 'suspended';
-  const targetCents = TONALITY[tonality];
+  // ── Layer 2: Chord voicings — frequency ratios × base freq, exponential ramp ─
+  // Scene selects voicing: CLIMAX/AFTERMATH get special shapes; else momentum-driven.
+  let voicingKey;
+  if (_currentScene === SCENE.CLIMAX)    voicingKey = 'climax';
+  else if (_currentScene === SCENE.AFTERMATH) voicingKey = 'aftermath';
+  else if (momentum < -0.2)             voicingKey = 'home_dominant';
+  else if (momentum >  0.2)             voicingKey = 'away_dominant';
+  else                                   voicingKey = 'tied_contested';
+  const ratios = VOICINGS[voicingKey];
   _drones.forEach((d, i) => {
-    d.osc.detune.linearRampToValueAtTime(targetCents[i], now + 3);
+    const targetFreq = d.baseFreq * ratios[i];
+    d.osc.frequency.cancelScheduledValues(now);
+    d.osc.frequency.setValueAtTime(d.osc.frequency.value, now);
+    d.osc.frequency.exponentialRampToValueAtTime(Math.max(targetFreq, 0.001), now + 5);
+    // Clear detune — voicing is now driven by frequency, not cents
+    d.osc.detune.cancelScheduledValues(now);
+    d.osc.detune.linearRampToValueAtTime(0, now + 0.1);
     const baseDroneGain = 0.04 - i * 0.008;
     d.gain.gain.linearRampToValueAtTime(baseDroneGain * scDrone * silenceGain, now + 4);
   });
 
   // ── Layer 3: Chaos — turnover burst gates noise, with 2s independent tail ─
   if (_chaosGain) {
-    const dtSecAudio = 1 / 60;  // audio runs every frame at ~60fps
+    const dtSecAudio = 1 / 60;
     if (toBurst > 0.5) _chaosTail = Math.max(_chaosTail, toBurst);
     _chaosTail *= Math.exp(-dtSecAudio / 2.0);  // τ=2s decay
+
+    // Free-throw chaos silence: suppress chaos layer during ritual window
+    _ftSilenceTimer = Math.max(0, _ftSilenceTimer - 1000 / 60);
+    const ftMute = _ftSilenceTimer > 0 ? 0 : 1;
+
     const chaosVol = Math.max(
       toBurst > 0.3 ? (toBurst - 0.3) / 0.7 * 0.06 : 0,
       _chaosTail * 0.06
     );
-    _chaosGain.gain.linearRampToValueAtTime(playing ? chaosVol * scChaos * silenceLayerMul : 0, now + 0.2);
+    _chaosGain.gain.linearRampToValueAtTime(
+      playing ? chaosVol * scChaos * silenceLayerMul * ftMute : 0, now + 0.2
+    );
+
+    // Tremolo depth: ramps up when toBurst > 0.4, nervous crowd rhythm
+    if (_tremoloGain) {
+      const tremoloDepth = toBurst > 0.4 ? (toBurst - 0.4) / 0.6 * chaosVol * 0.8 : 0;
+      _tremoloGain.gain.linearRampToValueAtTime(
+        playing ? tremoloDepth * scChaos * silenceLayerMul * ftMute : 0, now + 0.3
+      );
+      // Vary LFO speed 4-6Hz with energy for organic feel
+      _tremoloLFO.frequency.linearRampToValueAtTime(4 + energy * 2, now + 1);
+    }
   }
 
   // ── Layer 4: Clutch — insert compressor + heartbeat in final 4 min ─
@@ -1934,6 +2043,9 @@ function seek(sec) {
   _animeFreeze  = 0; _blackFlash = 0;
   _animeMomX = 0; _animeMomV = 0;
   _bcDiscreteEnergy = 0; _bcDiscreteMomentum = 0; _bcLastEventT = -1;
+  _ftRitualPhase = 0; _ftRitualTimer = 0;
+  _timeoutDrift = 0; _ftSilenceTimer = 0;
+  _bcDimTimer = 0; _bcScorebugPulse = null; _bcRecapDarkTime = 0;
   if (game) {
     while (eventIdx < game.events.length && game.events[eventIdx].t <= sec) eventIdx++;
     advanceScore(sec);
@@ -2342,10 +2454,26 @@ function drawCosmic(dt) {
 // ─── Broadcast renderer ───────────────────────────────────────────────────────
 let _bcRunTeam = null;   // 'home' | 'away' | null — which team is on a live run
 let _bcRunPts  = 0;
-let _bcRecapTimer = 0;   // ms remaining for quarter-end recap card
-let _bcLastPeriod = 1;
+let _bcRecapTimer    = 0;   // ms remaining for quarter-end recap card
+let _bcRecapDarkTime = 0;   // ms of full-dark phase at quarter break (first 3s)
+let _bcLastPeriod    = 1;
+let _bcDimTimer      = 0;   // ms remaining for canvas dim on key moments (500ms)
+let _bcScorebugPulse = null; // { team, timer } — active score bug pulse
+let _ftRitualTimer   = 0;   // ms remaining of free-throw particle damp (1s damp + 2s resume)
+let _ftRitualPhase   = 0;   // 0=inactive 1=damping(1s) 2=resuming(2s)
+let _timeoutDrift    = 0;   // ms remaining of timeout particle center-drift (3s)
 
 function drawBroadcast(dt) {
+  // Quarter-break full-dark intermission — 3s black frame with score visible
+  if (_bcRecapDarkTime > 0) {
+    _bcRecapDarkTime -= dt;
+    ctx.fillStyle = 'rgb(0,0,0)';
+    ctx.fillRect(0, 0, W, H);
+    simulateAndGetParams(dt);  // keep physics ticking
+    updateBroadcastHUD(dt);
+    return;
+  }
+
   const raw    = simulateAndGetParams(dt);
   // Broadcast: discrete updates — visuals only shift on scoring events, not every frame
   const shaped = shapeBroadcast(raw.energy, raw.momentum);
@@ -2358,8 +2486,12 @@ function drawBroadcast(dt) {
   // Reduced particle density (50% of normal) — data layer is the visual here
   const bcCount = Math.floor(activeCount * 0.5);
 
+  // Canvas dim: key moment just fired — alpha fill to ~0.6 for 500ms then recover
+  _bcDimTimer = Math.max(0, _bcDimTimer - dt);
+  const dimExtra = _bcDimTimer > 0 ? 0.35 * (_bcDimTimer / 500) : 0;
+
   // Slightly lighter trail fade than minimal so background stays legible
-  ctx.fillStyle = `rgba(8,12,28,${0.22 - energy * 0.06 + raw.tensionMemory * 0.05 + sp.bgDark})`;
+  ctx.fillStyle = `rgba(8,12,28,${0.22 - energy * 0.06 + raw.tensionMemory * 0.05 + sp.bgDark + dimExtra})`;
   ctx.fillRect(0, 0, W, H);
 
   // Subtle central glow — suppressed during post-peak silence
@@ -2483,20 +2615,31 @@ function updateBroadcastHUD(dt) {
     banner.classList.remove('visible');
   }
 
-  // Quarter recap card — show for 3s after a period ends
+  // Score bug pulse — flash outline in leading team color for 800ms
+  if (_bcScorebugPulse) {
+    _bcScorebugPulse.timer -= dt;
+    if (_bcScorebugPulse.timer <= 0) {
+      _bcScorebugPulse = null;
+      document.getElementById('bc-score-bug').classList.remove('pulse');
+      document.getElementById('bc-score-bug').style.outlineColor = 'transparent';
+    }
+  }
+
+  // Quarter recap card — show after dark phase ends
   if (_bcRecapTimer > 0) {
     _bcRecapTimer -= dt;
     document.getElementById('bc-recap').classList.add('visible');
     if (_bcRecapTimer <= 0) document.getElementById('bc-recap').classList.remove('visible');
   }
 
-  // Detect period boundary to show recap
+  // Detect period boundary — 3s full-dark then 3s recap card
   if (periodNum !== _bcLastPeriod && periodNum > _bcLastPeriod) {
     const finishedQ = _bcLastPeriod;
     document.getElementById('bc-recap-label').textContent = `End of Q${finishedQ}`;
     document.getElementById('bc-recap-score').textContent = `${game.homeTeam}  ${h} — ${a}  ${game.awayTeam}`;
-    _bcRecapTimer = 3000;
-    _bcLastPeriod = periodNum;
+    _bcRecapDarkTime = 3000;  // 3s full-dark intermission first
+    _bcRecapTimer    = 3000;  // then 3s recap card (starts after dark phase)
+    _bcLastPeriod    = periodNum;
   }
 }
 
@@ -2557,7 +2700,10 @@ function applyMode(mode) {
     document.getElementById('bc-away-tri').textContent = game.awayTeam;
     // Reset run tracker
     _bcRunTeam = null; _bcRunPts = 0;
-    _bcRecapTimer = 0; _bcLastPeriod = Math.min(Math.floor(playheadSec / 720) + 1, 4);
+    _bcRecapTimer = 0; _bcRecapDarkTime = 0;
+    _bcLastPeriod = Math.min(Math.floor(playheadSec / 720) + 1, 4);
+    _bcDimTimer = 0; _bcScorebugPulse = null;
+    document.getElementById('bc-score-bug').classList.remove('pulse');
     document.getElementById('bc-recap').classList.remove('visible');
   }
 
