@@ -623,6 +623,23 @@ let flashAlpha  = 0;                           // white flash
 let runGlow     = 0;                           // power-up glow intensity (0→1)
 let chyronTimer = 0;                           // ms remaining for current chyron
 const CHYRON_DURATION = 1800;                  // ms
+let _blackFlash = 0;                           // frames of full-black on lead_change
+
+// Anime momentum spring — displays _effectiveMomentum with overshoot
+// x: current display value, v: velocity, overshoots when momentum shifts >0.3
+let _animeMomX = 0, _animeMomV = 0;
+const ANIME_MOM_K = 8.0, ANIME_MOM_DAMP = 0.55;
+
+function updateAnimeMomentumSpring(target, dt) {
+  const dtSec = dt / 1000;
+  const shift = Math.abs(target - _animeMomX);
+  // Large shift: add a kick in the target direction so it overshoots
+  if (shift > 0.3) _animeMomV += Math.sign(target - _animeMomX) * shift * 0.5;
+  _animeMomV += (target - _animeMomX) * ANIME_MOM_K * dtSec;
+  _animeMomV *= Math.pow(ANIME_MOM_DAMP, dtSec * 60);
+  _animeMomX += _animeMomV * dtSec;
+  _animeMomX  = Math.max(-1.5, Math.min(1.5, _animeMomX));  // allow slight overshoot past ±1
+}
 
 // ─── Crowd Heat (effectiveEnergy) ────────────────────────────────────────────
 // Crowd Heat adds thresholds, hysteresis, and aftershock decay so energy
@@ -1156,10 +1173,12 @@ function shapeMinimal(energy, momentum, dt) {
 }
 
 // Anime: exaggerated spikes — energy^0.6 compresses low end, stretches highs
+// Momentum goes through an overshoot spring so big shifts feel physical.
 let _animeFreeze = 0;  // frames remaining in frame-freeze
 function shapeAnime(energy, momentum, dt) {
   const e = Math.pow(Math.max(0, energy), 0.6);
-  return { energy: e, momentum };
+  updateAnimeMomentumSpring(momentum, dt);
+  return { energy: e, momentum: _animeMomX };
 }
 
 // Cosmic: uses raw signals — mode diverges through shader uniforms, not here
@@ -1246,6 +1265,14 @@ function drawMinimal(dt) {
 function drawAnime(dt) {
   // Frame-freeze: skip physics+draw for a few frames on big hits, then burst
   if (_animeFreeze > 0) { _animeFreeze--; return; }
+
+  // Black flash: 2-frame full-black cut on lead_change (camera-cut feel)
+  if (_blackFlash > 0) {
+    _blackFlash--;
+    ctx.fillStyle = 'rgb(0,0,0)';
+    ctx.fillRect(0, 0, W, H);
+    return;
+  }
 
   const raw    = simulateAndGetParams(dt);
   const shaped = shapeAnime(raw.energy, raw.momentum, dt);
@@ -1728,6 +1755,7 @@ function fireMomentAudio(km) {
       triggerShake(0.6 + km.intensity * 0.6);
       showChyron(km.label, '#ff4466');
     } else if (km.type === 'lead_change') {
+      _blackFlash = 2;  // 2-frame full black cut before flash
       triggerFlash(0.35);
       triggerShake(0.4);
       showChyron('Lead Change', '#3399ff');
@@ -1903,7 +1931,8 @@ function seek(sec) {
   resetDisplayColor();
   _chaosTail = 0;
   _minEnvEnergy = 0; _minEnvMomentum = 0;
-  _animeFreeze  = 0;
+  _animeFreeze  = 0; _blackFlash = 0;
+  _animeMomX = 0; _animeMomV = 0;
   _bcDiscreteEnergy = 0; _bcDiscreteMomentum = 0; _bcLastEventT = -1;
   if (game) {
     while (eventIdx < game.events.length && game.events[eventIdx].t <= sec) eventIdx++;
@@ -2021,12 +2050,13 @@ async function initCosmic() {
 
   const mat = new THREE.ShaderMaterial({
     uniforms: {
-      homeColor: { value: new THREE.Color(0x1D428A) },
-      awayColor: { value: new THREE.Color(0x860038) },
-      homePos:   { value: new THREE.Vector3(-80, 0, 0) },
-      awayPos:   { value: new THREE.Vector3( 80, 0, 0) },
-      momentum:  { value: 0.0 },
-      energy:    { value: 0.5 },
+      homeColor:     { value: new THREE.Color(0x1D428A) },
+      awayColor:     { value: new THREE.Color(0x860038) },
+      homePos:       { value: new THREE.Vector3(-80, 0, 0) },
+      awayPos:       { value: new THREE.Vector3( 80, 0, 0) },
+      momentum:      { value: 0.0 },
+      energy:        { value: 0.5 },
+      tensionMemory: { value: 0.0 },
     },
     vertexShader: `
       attribute float size;
@@ -2035,21 +2065,34 @@ async function initCosmic() {
       uniform vec3  awayPos;
       uniform float momentum;
       uniform float energy;
+      uniform float tensionMemory;
       varying float vSide;
 
       void main() {
         // side is -1 for home, +1 for away — baked at creation time
 
-        // Gravity: pull toward the dominant attractor
+        // Inverse-square gravity: dominant team's pull scales with 1/dist²
+        // Stronger pull compresses the losing nebula; weaker disperses the winning one.
         float homeStr = clamp(0.5 - momentum * 0.5, 0.0, 1.0);
         float awayStr = clamp(0.5 + momentum * 0.5, 0.0, 1.0);
         float pull = (side < 0.0) ? homeStr : awayStr;
 
-        // The dominant team's stars spread outward; losing team contracts inward
-        float scale = 0.6 + pull * 0.8;
         vec3 center = (side < 0.0) ? homePos : awayPos;
         vec3 offset = position - center;
-        vec3 newPos = center + offset * scale;
+        float dist2  = dot(offset, offset);
+        // k chosen so at typical dist²≈6400 (dist=80), scale ≈ 0.6+pull*0.8 as before
+        float k      = 5120.0;
+        float invSq  = k / (dist2 + 400.0);  // ε=400 prevents singularity
+        float scale  = 0.4 + pull * clamp(invSq, 0.2, 1.4);
+
+        // Nebula elongation: dominant team stretches toward center proportional to tensionMemory
+        float isDominant = (side < 0.0) ? clamp(-momentum, 0.0, 1.0)
+                                        : clamp( momentum, 0.0, 1.0);
+        float stretchX = 1.0 + isDominant * tensionMemory * 0.4;
+        vec3 scaledOffset = vec3(offset.x * scale * stretchX,
+                                 offset.y * scale,
+                                 offset.z * scale);
+        vec3 newPos = center + scaledOffset;
 
         vSide = side;
         vec4 mvPos = modelViewMatrix * vec4(newPos, 1.0);
@@ -2202,7 +2245,9 @@ function drawCosmic(dt) {
   // Tension slows camera response — lerp factor 0.02 → 0.006 at full tension.
   // High tension = momentum shifts arrive heavier, camera feels reluctant.
   const camLerp = 0.02 - tensionMemory * 0.014;
-  camera.position.x += (Math.sin(_camOrbitAngle) * orbitRadius * 0.35 - camera.position.x) * camLerp;
+  // Camera lean: bias X toward dominant team's side (momentum * 30 units)
+  const camTargetX = Math.sin(_camOrbitAngle) * orbitRadius * 0.35 + momentum * 30;
+  camera.position.x += (camTargetX - camera.position.x) * camLerp;
   camera.position.y += (Math.cos(_camOrbitAngle * 0.6) * orbitRadius * 0.15 - camera.position.y) * camLerp;
   camera.position.z += (orbitRadius - camera.position.z) * camLerp;
   camera.lookAt(0, 0, 0);
@@ -2276,8 +2321,9 @@ function drawCosmic(dt) {
   }
 
   // ── Update shader uniforms ────────────────────────────────────────
-  mat.uniforms.momentum.value = momentum;
-  mat.uniforms.energy.value   = energy;
+  mat.uniforms.momentum.value      = momentum;
+  mat.uniforms.energy.value        = energy;
+  mat.uniforms.tensionMemory.value = tensionMemory;
 
   const homeRgb = hexToRgb(game.homeColor);
   const awayRgb = hexToRgb(game.awayColor);
