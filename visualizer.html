@@ -491,10 +491,13 @@ const GAME_SENTENCES = {
 async function loadGame(gameId) {
   const res = await fetch(`data/${gameId}.json`);
   game = await res.json();
-  eventIdx = 0; _scoreIdx = 0; _scoreH = 0; _scoreA = 0;
+  endShown = false;
+  endSettleT = 0;
+  document.getElementById('end-card').classList.remove('visible');
   document.getElementById('start-title').textContent = game.title;
   document.getElementById('start-meta').textContent =
     `${game.awayTeam} vs ${game.homeTeam}  ·  ${game.date}`;
+  seek(0);
   buildTimeline();
 }
 
@@ -515,10 +518,11 @@ function sampleAt(curve, sec) {
 }
 
 function clockString(sec) {
-  const period   = Math.min(Math.floor(sec / 720) + 1, 4);
-  const inPeriod = sec % 720;
-  const m = Math.floor(inPeriod / 60);
-  const s = Math.floor(inPeriod % 60);
+  const period    = Math.min(Math.floor(sec / 720) + 1, 4);
+  const inPeriod  = sec % 720;
+  const remaining = 720 - inPeriod;
+  const m = Math.floor(remaining / 60);
+  const s = Math.floor(remaining % 60);
   return `Q${period}  ${m}:${s.toString().padStart(2, '0')}`;
 }
 
@@ -571,53 +575,6 @@ function rgbStr(rgb, alpha) {
   return `rgba(${rgb[0]},${rgb[1]},${rgb[2]},${alpha.toFixed(3)})`;
 }
 
-// Clamp an angle delta to [-max, max], wrapping through [-π, π]
-function clampAngle(delta, max) {
-  while (delta >  Math.PI) delta -= Math.PI * 2;
-  while (delta < -Math.PI) delta += Math.PI * 2;
-  return Math.max(-max, Math.min(max, delta));
-}
-
-// ─── Color gradient lag ───────────────────────────────────────────────────────
-// _displayPrimary / _displaySecondary lag behind the target color at τ≈3s.
-// When momentum shifts fast (>0.1/s game-time), briefly overshoot 15% past
-// the target before settling — color feels like it has inertia.
-let _displayPrimary   = null;  // [r,g,b] — lazy-initialised on first frame
-let _displaySecondary = null;
-let _prevMomentumForColor = 0;
-
-function updateDisplayColor(targetPrimary, targetSecondary, momentum, dt) {
-  const dtSec = dt / 1000;
-
-  if (!_displayPrimary) {
-    _displayPrimary   = targetPrimary.slice();
-    _displaySecondary = targetSecondary.slice();
-    _prevMomentumForColor = momentum;
-    return;
-  }
-
-  const colorLagTau = 3.0;
-  const alpha = 1 - Math.exp(-dtSec / colorLagTau);
-
-  // Detect rapid momentum shift for overshoot
-  const momDelta = (momentum - _prevMomentumForColor) / Math.max(dtSec, 0.001);
-  const overshoot = Math.abs(momDelta) > 0.1 ? 0.15 * Math.sign(momDelta) : 0;
-  _prevMomentumForColor = momentum;
-
-  for (let i = 0; i < 3; i++) {
-    const overTarget = targetPrimary[i] + (targetPrimary[i] - _displayPrimary[i]) * overshoot;
-    _displayPrimary[i] += (overTarget - _displayPrimary[i]) * alpha;
-
-    const overTarget2 = targetSecondary[i] + (targetSecondary[i] - _displaySecondary[i]) * overshoot;
-    _displaySecondary[i] += (overTarget2 - _displaySecondary[i]) * alpha;
-  }
-}
-
-function resetDisplayColor() {
-  _displayPrimary         = null;
-  _displaySecondary       = null;
-  _prevMomentumForColor   = 0;
-}
 
 // ─── Renderer system ─────────────────────────────────────────────────────────
 // endSettleT: 0 = normal playback, 1 = fully settled to winner color
@@ -786,122 +743,6 @@ function resetTensionMemory() {
   _tensionEnergyTimer = 0;
 }
 
-// ─── Director moments ─────────────────────────────────────────────────────────
-// Rare, system-triggered interruptions lasting 3-8 real seconds.
-// At most one per 90 real seconds. Four types:
-//   time_dilation       — clutch_shot, final 90s, margin ≤ 3
-//   gravitational_collapse — run_start, 10+ unanswered, tensionMemory > 0.6 (Cosmic only)
-//   bass_drop           — lead_change, final 2 min (Anime + Broadcast)
-//   exhale              — postPeakSilence trigger (all modes)
-let _lastDirectorAt    = -999999;   // real ms timestamp of last director moment
-let _dilationTimer     = 0;         // ms remaining at 30% physics speed
-let _dilationRelease   = 0;         // ms remaining in 1s snap-back phase
-let _freezeFrames      = 0;         // physics frames to skip (bass drop freeze)
-let _freezeBoost       = 0;         // 0→1 boost applied to particle velocities post-freeze; decays over 3s
-let _collapseActive    = false;
-let _collapseTimer     = 0;         // ms remaining in gravitational collapse
-let _collapsePhase     = 0;         // 0=lurch-in, 1=explode-out
-
-function resetDirector() {
-  _lastDirectorAt  = -999999;
-  _dilationTimer   = 0;
-  _dilationRelease = 0;
-  _freezeFrames    = 0;
-  _freezeBoost     = 0;
-  _collapseActive  = false;
-  _collapseTimer   = 0;
-  _collapsePhase   = 0;
-}
-
-function triggerDirectorMoment(type) {
-  const nowMs = performance.now();
-  if (nowMs - _lastDirectorAt < 90000) return;  // 90s cooldown
-  _lastDirectorAt = nowMs;
-
-  if (type === 'time_dilation' && currentMode !== 'cosmic') {
-    _dilationTimer   = 4000;
-    _dilationRelease = 0;
-    // Pitch drones down 8% then recover
-    if (audioCtx && _drones) {
-      const now = audioCtx.currentTime;
-      _drones.forEach(d => {
-        d.osc.frequency.cancelScheduledValues(now);
-        d.osc.frequency.setValueAtTime(d.osc.frequency.value, now);
-        d.osc.frequency.exponentialRampToValueAtTime(d.baseFreq * 0.92, now + 0.3);
-        d.osc.frequency.exponentialRampToValueAtTime(d.baseFreq,        now + 5.0);
-      });
-    }
-  }
-
-  if (type === 'gravitational_collapse' && currentMode === 'cosmic') {
-    _collapseActive = true;
-    _collapseTimer  = 3000;
-    _collapsePhase  = 0;
-  }
-
-  if (type === 'bass_drop' && (currentMode === 'anime' || currentMode === 'broadcast')) {
-    _freezeFrames = 2;
-    _freezeBoost  = 1.0;
-    fireBassThump();
-  }
-
-  // exhale: no extra state needed — _postPeakSilence already does the work.
-  // The director tag just enforces the 90s cooldown so it doesn't stack.
-}
-
-function fireBassThump() {
-  if (!audioCtx) return;
-  const now  = audioCtx.currentTime;
-  const osc  = audioCtx.createOscillator();
-  const gain = audioCtx.createGain();
-  osc.type = 'sine'; osc.frequency.value = 40;
-  gain.gain.setValueAtTime(0.4, now);
-  gain.gain.exponentialRampToValueAtTime(0.001, now + 0.15);
-  osc.connect(gain); gain.connect(_master);
-  osc.start(now); osc.stop(now + 0.2);
-}
-
-// ─── Post-peak silence ────────────────────────────────────────────────────────
-// After a climax discharges (tension drops steeply), the system enters a brief
-// exhale — low particle count, near-silence. Then recovers slowly from center.
-let _postPeakSilence   = false;
-let _postPeakTimer     = 0;      // real ms remaining in silence
-let _postPeakRecovery  = 0;      // 0→1 during recovery phase (6-10s)
-let _prevTension       = 0;      // tension from previous frame, for drop detection
-
-function resetPostPeak() {
-  _postPeakSilence  = false;
-  _postPeakTimer    = 0;
-  _postPeakRecovery = 0;
-  _prevTension      = 0;
-}
-
-function updatePostPeak(dt) {
-  const tensionDrop = _prevTension - tensionMemory;
-
-  // Trigger: tension fell >0.3 within one frame AND is now below 0.4 — climax just exhaled
-  if (tensionDrop > 0.3 && tensionMemory < 0.4 && !_postPeakSilence && _postPeakRecovery === 0) {
-    _postPeakSilence = true;
-    _postPeakTimer   = 8000 + Math.random() * 7000;  // 8–15 real seconds
-    triggerDirectorMoment('exhale');
-  }
-
-  if (_postPeakSilence) {
-    _postPeakTimer -= dt;
-    if (_postPeakTimer <= 0) {
-      _postPeakSilence  = false;
-      _postPeakRecovery = 0.001;  // kick off recovery
-    }
-  }
-
-  // Recovery: 0→1 over 6–10 real seconds
-  if (_postPeakRecovery > 0 && _postPeakRecovery < 1) {
-    _postPeakRecovery = Math.min(1, _postPeakRecovery + dt / 8000);
-    if (_postPeakRecovery >= 1) _postPeakRecovery = 0;  // done recovering
-  }
-
-  _prevTension = tensionMemory;
-}
 
 // ─── Scene logic ─────────────────────────────────────────────────────────────
 // Four scene states with distinct visual + audio grammar.
@@ -921,7 +762,7 @@ function computeScene() {
   const finalFour  = timeLeft < 240;
 
   let target;
-  if (_postPeakSilence || blowout) {
+  if (blowout) {
     target = SCENE.AFTERMATH;
   } else if (finalFour && closeGame) {
     target = SCENE.CLIMAX;
@@ -970,15 +811,15 @@ function getSceneParams() {
   };
 }
 
-// Desaturate an rgb object toward gray by `amount` (0=no change, 1=full gray)
+// Desaturate an rgb array toward gray by `amount` (0=no change, 1=full gray)
 function desaturateRgb(rgb, amount) {
   if (amount <= 0) return rgb;
-  const gray = rgb.r * 0.299 + rgb.g * 0.587 + rgb.b * 0.114;
-  return {
-    r: Math.round(rgb.r + (gray - rgb.r) * amount),
-    g: Math.round(rgb.g + (gray - rgb.g) * amount),
-    b: Math.round(rgb.b + (gray - rgb.b) * amount),
-  };
+  const gray = rgb[0] * 0.299 + rgb[1] * 0.587 + rgb[2] * 0.114;
+  return [
+    Math.round(rgb[0] + (gray - rgb[0]) * amount),
+    Math.round(rgb[1] + (gray - rgb[1]) * amount),
+    Math.round(rgb[2] + (gray - rgb[2]) * amount),
+  ];
 }
 
 // Called from checkMoments when a clutch/lead-change fires
@@ -1004,44 +845,7 @@ function simulateAndGetParams(dt) {
     rawEnergy   = rawEnergy   * (1 - endSettleT * 0.6);
   }
 
-  // Director: advance dilation timer; compute effective dt for physics
-  let physicsDt = dt;
-  if (_freezeFrames > 0) {
-    _freezeFrames--;
-    // On the frame freeze ends, double all particle velocities
-    if (_freezeFrames === 0) {
-      for (let i = 0; i < POOL_SIZE; i++) { pool[i].vx *= 2; pool[i].vy *= 2; }
-    }
-    // Skip physics this frame — particles are frozen
-    updateStateMemory(rawMomentum, dt);
-    updateCrowdHeat(rawEnergy, dt);
-    updateTensionMemory(rawEnergy, dt);
-    updatePostPeak(dt);
-    const tP = (rawMomentum + 1) / 2;
-    const tgtP = lerpColor(hexToRgb(game.homeColor), hexToRgb(game.awayColor), tP);
-    const tgtS = lerpColor(hexToRgb(game.homeColorSecondary), hexToRgb(game.awayColorSecondary), tP);
-    updateDisplayColor(tgtP, tgtS, rawMomentum, dt);
-    const pr = _displayPrimary ? _displayPrimary.map(Math.round) : tgtP;
-    const sc = _displaySecondary ? _displaySecondary.map(Math.round) : tgtS;
-    const ac = Math.min(1000, Math.max(80, Math.round(150 + rawEnergy * 850)));
-    return { momentum: rawMomentum, energy: rawEnergy, rawEnergy, primary: pr, secondary: sc,
-             activeCount: ac, tensionMemory, postPeakSilence: _postPeakSilence, postPeakRecovery: _postPeakRecovery };
-  }
-  if (_dilationTimer > 0) {
-    _dilationTimer -= dt;
-    if (_dilationTimer <= 0) { _dilationTimer = 0; _dilationRelease = 1000; }
-    physicsDt = dt * 0.3;
-  } else if (_dilationRelease > 0) {
-    _dilationRelease -= dt;
-    // Ease physics speed from 30% back to 100% over 1s
-    const easeT  = Math.max(0, _dilationRelease / 1000);
-    physicsDt    = dt * (0.3 + 0.7 * (1 - easeT));
-    if (_dilationRelease <= 0) _dilationRelease = 0;
-  }
-  // Freeze-boost decays: particles gradually return to normal speed over 3s
-  if (_freezeBoost > 0) {
-    _freezeBoost = Math.max(0, _freezeBoost - dt / 3000);
-  }
+  const physicsDt = dt;
 
   // State memory — updates _effectiveMomentum
   updateStateMemory(rawMomentum, physicsDt);
@@ -1052,9 +856,6 @@ function simulateAndGetParams(dt) {
 
   // Tension Memory — slow-decay dramatic weight; also charges from sustained high energy
   updateTensionMemory(rawEnergy, physicsDt);
-
-  // Post-peak silence — detects tension discharge, manages exhale + recovery timing
-  updatePostPeak(physicsDt);
 
   // highStakes adds a subtle persistent energy floor
   const baselineEnergy = _highStakes ? Math.max(energy, 0.35) : energy;
@@ -1067,10 +868,8 @@ function simulateAndGetParams(dt) {
   const targetPrimary  = lerpColor(homeRgb,  awayRgb,  t);
   const targetSecondary = lerpColor(homeRgb2, awayRgb2, t);
 
-  // Color gradient lag: _displayPrimary trails the target at τ=3s with overshoot
-  updateDisplayColor(targetPrimary, targetSecondary, momentum, dt);
-  const primary   = _displayPrimary   ? _displayPrimary.map(Math.round)   : targetPrimary;
-  const secondary = _displaySecondary ? _displaySecondary.map(Math.round) : targetSecondary;
+  const primary   = targetPrimary;
+  const secondary = targetSecondary;
 
   // Gravity: direction shifts toward the leading team's side of the canvas
   // momentum > 0 → away team leads → pull rightward; < 0 → home → leftward
@@ -1083,34 +882,8 @@ function simulateAndGetParams(dt) {
   const overloadCap = _aftershockPool > 1.2 ? 1800 : 1000;
   let activeCount = Math.min(overloadCap, Math.max(deadSpaceFloor, Math.round(150 + baselineEnergy * 850)));
 
-  // Post-peak silence overrides: drop to 40-60 particles; recovery re-emerges from 40→normal
-  if (_postPeakSilence) {
-    activeCount = Math.round(40 + Math.random() * 20);
-  } else if (_postPeakRecovery > 0) {
-    const recoveryTarget = Math.min(overloadCap, Math.max(deadSpaceFloor, Math.round(150 + baselineEnergy * 850)));
-    activeCount = Math.round(40 + _postPeakRecovery * (recoveryTarget - 40));
-  }
-
   const maxSpeed    = 1.5 + baselineEnergy * 4;
 
-  // Free-throw ritual: advance timer, compute velocity damp scale (0.2 during damp, 1 after)
-  let ftDampScale = 1.0;
-  let ftCenterForce = 0;
-  if (_ftRitualPhase === 1) {
-    _ftRitualTimer -= dt;
-    ftDampScale = 0.2;
-    if (_ftRitualTimer <= 0) { _ftRitualPhase = 2; _ftRitualTimer = 2000; }
-  } else if (_ftRitualPhase === 2) {
-    _ftRitualTimer -= dt;
-    ftDampScale = 0.2 + 0.8 * (1 - _ftRitualTimer / 2000);  // ramp back to 1 over 2s
-    if (_ftRitualTimer <= 0) _ftRitualPhase = 0;
-  }
-
-  // Timeout drift: pull particles toward center over 3s
-  if (_timeoutDrift > 0) {
-    _timeoutDrift -= dt;
-    ftCenterForce = 0.003 * Math.max(0, _timeoutDrift / 3000);
-  }
 
   for (let i = 0; i < POOL_SIZE; i++) {
     const p = pool[i];
@@ -1120,41 +893,8 @@ function simulateAndGetParams(dt) {
     p.trail.push({ x: p.x, y: p.y });
     if (p.trail.length > maxTrail) p.trail.shift();
 
-    // Inertia: particles on the trailing team's half are heavier (damped more)
-    const pSide = p.x < W / 2 ? -1 : 1;  // -1=home side, +1=away side
-    const isTrailing = (momentum > 0 && pSide < 0) || (momentum < 0 && pSide > 0);
-    const damping = isTrailing ? 0.97 : 1.0;  // trailing side drags
-
-    // During silence particles drift toward zero — exhale, barely moving
-    // During recovery they re-emerge from center with growing influence
-    const silenceScale  = _postPeakSilence ? 0.0 : (_postPeakRecovery > 0 ? _postPeakRecovery : 1.0);
-    const recoveryCentering = _postPeakRecovery > 0 ? (1 - _postPeakRecovery) * 0.004 : 0;
-
-    // Direction resistance: velocity heading rotates toward gravity target at a
-    // capped rate — trailing particles are heavier and turn more slowly.
-    const dtSec = physicsDt / 1000;
-    const spd0  = Math.hypot(p.vx, p.vy);
-    if (spd0 > 0.01 && (gravX !== 0 || gravY !== 0)) {
-      const targetAngle  = Math.atan2(gravY, gravX);
-      const currentAngle = Math.atan2(p.vy, p.vx);
-      const maxTurn      = (isTrailing ? 0.8 : 2.0) * dtSec * silenceScale;
-      const turn         = clampAngle(targetAngle - currentAngle, maxTurn);
-      const cos = Math.cos(turn), sin = Math.sin(turn);
-      const nvx = p.vx * cos - p.vy * sin;
-      const nvy = p.vx * sin + p.vy * cos;
-      p.vx = nvx;
-      p.vy = nvy;
-    }
-
-    p.vx = p.vx * (damping * (0.92 + silenceScale * 0.08)) * ftDampScale
-         + (Math.random() - 0.5) * 0.25 * baselineEnergy * silenceScale
-         - p.vx * (1 - silenceScale) * 0.05;
-    p.vy = p.vy * (damping * (0.92 + silenceScale * 0.08)) * ftDampScale
-         + (Math.random() - 0.5) * 0.25 * baselineEnergy * silenceScale
-         - p.vy * (1 - silenceScale) * 0.05;
-    // Pull toward center during recovery or timeout drift
-    p.vx += (W / 2 - p.x) * (recoveryCentering + ftCenterForce);
-    p.vy += (H / 2 - p.y) * (recoveryCentering + ftCenterForce);
+    p.vx = p.vx * 0.99 + (Math.random() - 0.5) * 0.25 * baselineEnergy;
+    p.vy = p.vy * 0.99 + (Math.random() - 0.5) * 0.25 * baselineEnergy;
     // Soft centering force — scene spread inverts it (CLIMAX clusters, AFTERMATH disperses)
     const sceneCenter = 0.0003 / Math.max(0.3, getSceneParams().spread);
     p.vx += (W / 2 - p.x) * sceneCenter;
@@ -1162,12 +902,6 @@ function simulateAndGetParams(dt) {
 
     const spd = Math.hypot(p.vx, p.vy);
     if (spd > maxSpeed) { p.vx = p.vx / spd * maxSpeed; p.vy = p.vy / spd * maxSpeed; }
-
-    // Freeze-boost: damp velocity back toward normal over 3s after bass drop
-    if (_freezeBoost > 0) {
-      p.vx *= (1 - _freezeBoost * 0.02);
-      p.vy *= (1 - _freezeBoost * 0.02);
-    }
 
     p.x += p.vx * physicsDt / 16.67;
     p.y += p.vy * physicsDt / 16.67;
@@ -1179,8 +913,7 @@ function simulateAndGetParams(dt) {
     if (p.y > H+20) p.y = -20;
   }
 
-  return { momentum, energy: baselineEnergy, rawEnergy, primary, secondary, activeCount, tensionMemory,
-           postPeakSilence: _postPeakSilence, postPeakRecovery: _postPeakRecovery };
+  return { momentum, energy: baselineEnergy, rawEnergy, primary, secondary, activeCount, tensionMemory };
 }
 
 // ─── Per-mode signal shaping ─────────────────────────────────────────────────
@@ -1235,11 +968,10 @@ function drawMinimal(dt) {
   ctx.fillStyle = `rgba(0,0,0,${0.18 - energy * 0.05 + raw.tensionMemory * 0.05 + sp.bgDark})`;
   ctx.fillRect(0, 0, W, H);
 
-  if (energy > 0.15 && !raw.postPeakSilence) {
-    const glowScale = raw.postPeakRecovery > 0 ? raw.postPeakRecovery : 1;
+  if (energy > 0.15) {
     const r   = Math.min(W, H) * 0.55;
     const grd = ctx.createRadialGradient(W/2, H/2, 0, W/2, H/2, r);
-    grd.addColorStop(0, rgbStr(primary, energy * 0.07 * glowScale));
+    grd.addColorStop(0, rgbStr(primary, energy * 0.07));
     grd.addColorStop(1, 'rgba(0,0,0,0)');
     ctx.fillStyle = grd;
     ctx.fillRect(0, 0, W, H);
@@ -1334,12 +1066,10 @@ function drawAnime(dt) {
   ctx.fillStyle = `rgba(0,0,0,${0.12 - energy * 0.04 + raw.tensionMemory * 0.05 + sp.bgDark})`;
   ctx.fillRect(-20, -20, W + 40, H + 40);
 
-  // Vivid central glow — suppressed during post-peak silence
-  if (energy > 0.1 && !raw.postPeakSilence) {
-    const glowScale = raw.postPeakRecovery > 0 ? raw.postPeakRecovery : 1;
+  if (energy > 0.1) {
     const r   = Math.min(W, H) * 0.7;
     const grd = ctx.createRadialGradient(W/2, H/2, 0, W/2, H/2, r);
-    grd.addColorStop(0, rgbStr(primary, energy * 0.14 * glowScale));
+    grd.addColorStop(0, rgbStr(primary, energy * 0.14));
     grd.addColorStop(1, 'rgba(0,0,0,0)');
     ctx.fillStyle = grd;
     ctx.fillRect(-20, -20, W + 40, H + 40);
@@ -1541,8 +1271,6 @@ let _chaosGain, _chaosNoise;    // chaos layer
 let _tremoloLFO, _tremoloGain;  // chaos tremolo: 5Hz LFO gated on toBurst > 0.4
 let _clutchComp;                // clutch compressor (inserted when final 4 min)
 let _compActive = false;
-let _lastDroneModT = 0;
-let _ftSilenceTimer = 0;        // ms remaining of post-free-throw chaos silence
 
 // Chord voicings as frequency ratios relative to each drone's base frequency.
 // Four drones: 55Hz, 82.4Hz, 110Hz, 164.8Hz
@@ -1719,17 +1447,6 @@ function fireSwell(vol) {
   });
 }
 
-// Modulate drone pitches for a lead-change feel (brief dissonance then resolve)
-function fireLeadChangeMod() {
-  if (!audioCtx || !_drones) return;
-  const now = audioCtx.currentTime;
-  _drones.forEach((d, i) => {
-    const shift = i % 2 === 0 ? -25 : 20;
-    d.osc.detune.cancelScheduledValues(now);
-    d.osc.detune.setValueAtTime(shift, now);
-    d.osc.detune.linearRampToValueAtTime(0, now + 2.5);
-  });
-}
 
 // Per-event audio punctuation — called once per event as playhead crosses it
 function fireEventAudio(evt) {
@@ -1756,22 +1473,14 @@ function fireEventAudio(evt) {
     if (audioCtx && playing) fireTransient(0.05 + energy * 0.06);
     if (currentMode === 'anime') { triggerShake(0.3); triggerFlash(0.15); }
     if (currentMode === 'cosmic') triggerCosmicWave(0.25);
-  } else if (evt.type === 'free_throw') {
-    // Free throw ritual: damp particle velocities to 20%, silence chaos, then resume
-    if (currentMode === 'broadcast' || currentMode === 'minimal') {
-      _ftRitualTimer = 1000;
-      _ftRitualPhase = 1;
-    }
   } else if (evt.type === 'timeout') {
     if (audioCtx && playing && _duck) {
       const now = audioCtx.currentTime;
       _duck.gain.cancelScheduledValues(now);
       _duck.gain.setValueAtTime(_duck.gain.value, now);
-      _duck.gain.linearRampToValueAtTime(0.1, now + 0.3);
-      _duck.gain.linearRampToValueAtTime(1.0, now + 3.5);
+      _duck.gain.linearRampToValueAtTime(0.6, now + 0.3);
+      _duck.gain.linearRampToValueAtTime(1.0, now + 1.5);
     }
-    // Timeout particle drift to center over 3s
-    _timeoutDrift = 3000;
   }
 }
 
@@ -1789,13 +1498,7 @@ function fireMomentAudio(km) {
   }
 
   if (audioCtx && playing) {
-    if (km.type === 'lead_change') {
-      const now = audioCtx.currentTime;
-      if (now - _lastDroneModT > 4) {
-        _lastDroneModT = now;
-        fireLeadChangeMod();
-      }
-    } else if (km.type === 'run_start') {
+    if (km.type === 'run_start') {
       fireSwell(0.08 + km.intensity * 0.1);
     } else if (km.type === 'free_throw_miss') {
       // Descending pluck: 200Hz falling 30% to 140Hz over 200ms, then 800ms chaos silence
@@ -1809,7 +1512,6 @@ function fireMomentAudio(km) {
       gain.gain.exponentialRampToValueAtTime(0.001, now + 0.5);
       osc.connect(gain); gain.connect(_master); gain.connect(_conv);
       osc.start(now); osc.stop(now + 0.55);
-      _ftSilenceTimer = 800;  // suppress chaos layer for 800ms
     }
   }
 
@@ -1861,17 +1563,6 @@ function fireMomentAudio(km) {
     }
   }
 
-  // Director moments — evaluated after mode-specific effects
-  if (km.type === 'clutch_shot') {
-    const { h, a } = findScore(playheadSec);
-    const timeLeft = gameDuration() - playheadSec;
-    if (timeLeft < 90 && Math.abs(h - a) <= 3) triggerDirectorMoment('time_dilation');
-  } else if (km.type === 'run_start') {
-    const runPts = parseInt(km.label) || 0;  // label is e.g. "8-0 run"
-    if (runPts >= 10 && tensionMemory > 0.6)  triggerDirectorMoment('gravitational_collapse');
-  } else if (km.type === 'lead_change') {
-    if (gameDuration() - playheadSec < 120)   triggerDirectorMoment('bass_drop');
-  }
 }
 
 function updateAudio() {
@@ -1882,10 +1573,8 @@ function updateAudio() {
   const toBurst  = game.toBurst ? sampleAt(game.toBurst, playheadSec) : 0;
   const timeLeft = gameDuration() - playheadSec;
 
-  // ── Post-peak silence: override volumes for exhale + recovery ──
-  // silenceGain: 0.3 during silence (drones only), ramps to 1 during recovery
-  const silenceGain     = _postPeakSilence ? 0.3 : (_postPeakRecovery > 0 ? 0.3 + _postPeakRecovery * 0.7 : 1.0);
-  const silenceLayerMul = _postPeakSilence ? 0.0 : (_postPeakRecovery > 0 ? _postPeakRecovery : 1.0);
+  const silenceGain     = 1.0;
+  const silenceLayerMul = 1.0;
 
   // ── Scene audio grammar — layer multipliers per scene state ────
   // Blended across the same _sceneT as visuals.
@@ -1922,7 +1611,7 @@ function updateAudio() {
   _drones.forEach((d, i) => {
     const targetFreq = d.baseFreq * ratios[i];
     d.osc.frequency.cancelScheduledValues(now);
-    d.osc.frequency.setValueAtTime(d.osc.frequency.value, now);
+    d.osc.frequency.setValueAtTime(Math.max(d.osc.frequency.value, 0.001), now);
     d.osc.frequency.exponentialRampToValueAtTime(Math.max(targetFreq, 0.001), now + 5);
     // Clear detune — voicing is now driven by frequency, not cents
     d.osc.detune.cancelScheduledValues(now);
@@ -1937,23 +1626,19 @@ function updateAudio() {
     if (toBurst > 0.5) _chaosTail = Math.max(_chaosTail, toBurst);
     _chaosTail *= Math.exp(-dtSecAudio / 2.0);  // τ=2s decay
 
-    // Free-throw chaos silence: suppress chaos layer during ritual window
-    _ftSilenceTimer = Math.max(0, _ftSilenceTimer - 1000 / 60);
-    const ftMute = _ftSilenceTimer > 0 ? 0 : 1;
-
     const chaosVol = Math.max(
       toBurst > 0.3 ? (toBurst - 0.3) / 0.7 * 0.06 : 0,
       _chaosTail * 0.06
     );
     _chaosGain.gain.linearRampToValueAtTime(
-      playing ? chaosVol * scChaos * silenceLayerMul * ftMute : 0, now + 0.2
+      playing ? chaosVol * scChaos * silenceLayerMul : 0, now + 0.2
     );
 
     // Tremolo depth: ramps up when toBurst > 0.4, nervous crowd rhythm
     if (_tremoloGain) {
       const tremoloDepth = toBurst > 0.4 ? (toBurst - 0.4) / 0.6 * chaosVol * 0.8 : 0;
       _tremoloGain.gain.linearRampToValueAtTime(
-        playing ? tremoloDepth * scChaos * silenceLayerMul * ftMute : 0, now + 0.3
+        playing ? tremoloDepth * scChaos * silenceLayerMul : 0, now + 0.3
       );
       // Vary LFO speed 4-6Hz with energy for organic feel
       _tremoloLFO.frequency.linearRampToValueAtTime(4 + energy * 2, now + 1);
@@ -2002,27 +1687,30 @@ function tick(ts) {
   const dt = lastTs ? Math.min(ts - lastTs, 50) : 16.67;
   lastTs = ts;
 
-  if (playing) {
-    playheadSec += (dt / 1000) * speed * 20;
-    if (playheadSec >= gameDuration()) {
-      playheadSec = gameDuration();
-      showEndCard();
-    }
-    // Advance per-event pointers
-    if (game) {
-      while (eventIdx < game.events.length && game.events[eventIdx].t <= playheadSec) {
-        fireEventAudio(game.events[eventIdx]);
-        updateBroadcastRun(game.events[eventIdx]);
-        eventIdx++;
+  try {
+    if (playing) {
+      playheadSec += (dt / 1000) * speed * 20;
+      if (playheadSec >= gameDuration()) {
+        playheadSec = gameDuration();
+        showEndCard();
       }
-      advanceScore(playheadSec);
+      if (game) {
+        while (eventIdx < game.events.length && game.events[eventIdx].t <= playheadSec) {
+          fireEventAudio(game.events[eventIdx]);
+          updateBroadcastRun(game.events[eventIdx]);
+          eventIdx++;
+        }
+        advanceScore(playheadSec);
+      }
     }
-  }
 
-  if (game && !endShown) computeScene();
-  renderFrame(dt);
-  if (!endShown) { updateScoreUI(); checkMoments(); }
-  updateAudio();
+    if (game && !endShown) computeScene();
+    renderFrame(dt);
+    if (!endShown) { updateScoreUI(); checkMoments(); }
+    updateAudio();
+  } catch(e) {
+    console.error('tick error at t=' + playheadSec.toFixed(1) + ':', e);
+  }
 }
 
 function seek(sec) {
@@ -2034,17 +1722,12 @@ function seek(sec) {
   resetCrowdHeat();
   resetStateMemory();
   resetTensionMemory();
-  resetPostPeak();
   resetScene();
-  resetDirector();
-  resetDisplayColor();
   _chaosTail = 0;
   _minEnvEnergy = 0; _minEnvMomentum = 0;
   _animeFreeze  = 0; _blackFlash = 0;
   _animeMomX = 0; _animeMomV = 0;
   _bcDiscreteEnergy = 0; _bcDiscreteMomentum = 0; _bcLastEventT = -1;
-  _ftRitualPhase = 0; _ftRitualTimer = 0;
-  _timeoutDrift = 0; _ftSilenceTimer = 0;
   _bcDimTimer = 0; _bcScorebugPulse = null; _bcRecapDarkTime = 0;
   if (game) {
     while (eventIdx < game.events.length && game.events[eventIdx].t <= sec) eventIdx++;
@@ -2373,40 +2056,8 @@ function drawCosmic(dt) {
   mat.uniforms.homePos.value.set(homeSignedX,  arcY, 0);
   mat.uniforms.awayPos.value.set(awaySignedX, -arcY, 0);
 
-  // ── Gravitational collapse director moment ───────────────────────
-  if (_collapseActive) {
-    _collapseTimer -= dt;
-    if (_collapseTimer <= 0) {
-      if (_collapsePhase === 0) {
-        // Switch to explode-out phase
-        _collapsePhase = 1;
-        _collapseTimer = 1500;
-        triggerCosmicWave(1.0);  // big outward wave
-      } else {
-        _collapseActive = false;
-        geo.attributes.position.array.set(basePos);
-        geo.attributes.position.needsUpdate = true;
-      }
-    }
-    if (_collapseActive) {
-      const dominantX = momentum > 0 ? 80 : -80;  // dominant nebula center
-      const collapseT = _collapsePhase === 0
-        ? 1 - (_collapseTimer / 1500)   // 0→1 lurch in
-        : _collapseTimer / 1500;        // 1→0 explode out
-      const pos = geo.attributes.position.array;
-      const n   = pos.length / 3;
-      for (let i = 0; i < n; i++) {
-        const bx = basePos[i*3], by = basePos[i*3+1], bz = basePos[i*3+2];
-        pos[i*3]   = bx + (dominantX - bx) * collapseT * 0.6;
-        pos[i*3+1] = by * (1 - collapseT * 0.5);
-        pos[i*3+2] = bz * (1 - collapseT * 0.5);
-      }
-      geo.attributes.position.needsUpdate = true;
-    }
-  }
-
   // ── Update star positions for gravitational wave ──────────────────
-  const waveActive = _cosmicWave > 0.005 && !_collapseActive;
+  const waveActive = _cosmicWave > 0.005;
   if (waveActive !== _three.waveWasActive) {
     // State transition: always update on change
     _three.waveWasActive = waveActive;
@@ -2459,9 +2110,6 @@ let _bcRecapDarkTime = 0;   // ms of full-dark phase at quarter break (first 3s)
 let _bcLastPeriod    = 1;
 let _bcDimTimer      = 0;   // ms remaining for canvas dim on key moments (500ms)
 let _bcScorebugPulse = null; // { team, timer } — active score bug pulse
-let _ftRitualTimer   = 0;   // ms remaining of free-throw particle damp (1s damp + 2s resume)
-let _ftRitualPhase   = 0;   // 0=inactive 1=damping(1s) 2=resuming(2s)
-let _timeoutDrift    = 0;   // ms remaining of timeout particle center-drift (3s)
 
 function drawBroadcast(dt) {
   // Quarter-break full-dark intermission — 3s black frame with score visible
@@ -2494,12 +2142,10 @@ function drawBroadcast(dt) {
   ctx.fillStyle = `rgba(8,12,28,${0.22 - energy * 0.06 + raw.tensionMemory * 0.05 + sp.bgDark + dimExtra})`;
   ctx.fillRect(0, 0, W, H);
 
-  // Subtle central glow — suppressed during post-peak silence
-  if (energy > 0.1 && !raw.postPeakSilence) {
-    const glowScale = raw.postPeakRecovery > 0 ? raw.postPeakRecovery : 1;
+  if (energy > 0.1) {
     const r   = Math.min(W, H) * 0.6;
     const grd = ctx.createRadialGradient(W/2, H/2, 0, W/2, H/2, r);
-    grd.addColorStop(0, rgbStr(primary, energy * 0.06 * glowScale));
+    grd.addColorStop(0, rgbStr(primary, energy * 0.06));
     grd.addColorStop(1, 'rgba(0,0,0,0)');
     ctx.fillStyle = grd;
     ctx.fillRect(0, 0, W, H);
@@ -2720,8 +2366,12 @@ modeBtn.addEventListener('click', () => {
 const gameId     = new URLSearchParams(location.search).get('game') || '0041500407';
 const startScreen = document.getElementById('start-screen');
 
+let _tickStarted = false;
+
 loadGame(gameId).then(() => {
   startScreen.addEventListener('click', () => {
+    if (_tickStarted) return;
+    _tickStarted = true;
     initAudio();
     startScreen.style.opacity = '0';
     setTimeout(() => { startScreen.style.display = 'none'; }, 1200);
