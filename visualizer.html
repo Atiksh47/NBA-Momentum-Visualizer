@@ -468,6 +468,10 @@ canvas { display: block; }
 </div>
 
 <script>
+// Game-seconds that advance per real second at 1× speed.
+// A 48-min game (2880s) plays in 2.4 real minutes at 1×.
+const GAME_SPEED_SCALE = 20;
+
 // ─── Canvas ───────────────────────────────────────────────────────────────────
 const canvas = document.getElementById('c');
 const ctx = canvas.getContext('2d');
@@ -588,6 +592,10 @@ let runGlow     = 0;                           // power-up glow intensity (0→1
 let chyronTimer = 0;                           // ms remaining for current chyron
 const CHYRON_DURATION = 1800;                  // ms
 let _blackFlash = 0;                           // frames of full-black on lead_change
+// Speed-line lengths baked at trigger time so they don't flicker each frame.
+const SPEED_LINE_COUNT = 24;
+let _speedLineAngles = new Float32Array(SPEED_LINE_COUNT);
+let _speedLineLengths = new Float32Array(SPEED_LINE_COUNT);
 
 // Anime momentum spring — displays _effectiveMomentum with overshoot
 // x: current display value, v: velocity, overshoots when momentum shifts >0.3
@@ -666,6 +674,10 @@ function triggerShake(intensity) {
 
 function triggerFlash(alpha) {
   flashAlpha = Math.min(1, flashAlpha + alpha);
+  for (let i = 0; i < SPEED_LINE_COUNT; i++) {
+    _speedLineAngles[i]  = (i / SPEED_LINE_COUNT) * Math.PI * 2;
+    _speedLineLengths[i] = 0.5 + Math.random() * 0.5;
+  }
 }
 
 function triggerRunGlow(intensity) {
@@ -954,6 +966,104 @@ function shapeBroadcast(energy, momentum) {
   return { energy: _bcDiscreteEnergy, momentum: _bcDiscreteMomentum };
 }
 
+// ─── Shared particle renderer ────────────────────────────────────────────────
+// opts:
+//   count        — number of particles to draw from pool
+//   energy       — shaped energy value for this mode
+//   primary      — rgb array for dots/glow
+//   secondary    — rgb array for trails
+//   style        — 'minimal' | 'anime' | 'broadcast'
+function drawParticles(count, energy, primary, secondary, style) {
+  if (style === 'minimal') {
+    const maxSpecial = Math.floor(count * 0.05);
+    let specialDrawn = 0;
+    for (let i = 0; i < count; i++) {
+      const p     = pool[i];
+      const alpha = Math.min(0.35, (0.25 + energy * 0.55) * (0.6 + 0.4 * Math.sin(p.life * Math.PI * 2)));
+      if (p.trail.length > 1) {
+        ctx.beginPath();
+        ctx.moveTo(p.trail[0].x, p.trail[0].y);
+        for (let j = 1; j < p.trail.length; j++) ctx.lineTo(p.trail[j].x, p.trail[j].y);
+        ctx.strokeStyle = rgbStr(secondary, alpha * 0.3);
+        ctx.lineWidth   = p.radius * 0.6;
+        ctx.stroke();
+      }
+      if (p.special && energy > 0.4 && specialDrawn < maxSpecial) {
+        specialDrawn++;
+        const gr = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, p.radius * 9);
+        gr.addColorStop(0, rgbStr(primary, 0.4));
+        gr.addColorStop(1, 'rgba(0,0,0,0)');
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, p.radius * 9, 0, Math.PI * 2);
+        ctx.fillStyle = gr;
+        ctx.fill();
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, p.radius * (1 + energy * 0.4), 0, Math.PI * 2);
+        ctx.fillStyle = rgbStr(primary, 0.8);
+        ctx.fill();
+        continue;
+      }
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, p.radius * (1 + energy * 0.4), 0, Math.PI * 2);
+      ctx.fillStyle = rgbStr(primary, alpha);
+      ctx.fill();
+    }
+  } else if (style === 'anime') {
+    for (let i = 0; i < count; i++) {
+      const p     = pool[i];
+      const alpha = 0.45 + energy * 0.5;
+      if (p.trail.length > 1) {
+        ctx.beginPath();
+        ctx.moveTo(p.trail[0].x, p.trail[0].y);
+        for (let j = 1; j < p.trail.length; j++) ctx.lineTo(p.trail[j].x, p.trail[j].y);
+        ctx.strokeStyle = rgbStr(secondary, alpha * 0.18);
+        ctx.lineWidth   = p.radius * 0.5;
+        ctx.stroke();
+        const tipStart = Math.max(0, Math.floor(p.trail.length * 0.7));
+        if (tipStart < p.trail.length - 1) {
+          ctx.beginPath();
+          ctx.moveTo(p.trail[tipStart].x, p.trail[tipStart].y);
+          for (let j = tipStart + 1; j < p.trail.length; j++) ctx.lineTo(p.trail[j].x, p.trail[j].y);
+          ctx.strokeStyle = rgbStr(secondary, alpha * 0.65);
+          ctx.lineWidth   = p.radius * 1.6;
+          ctx.stroke();
+        }
+      }
+      if (runGlow > 0.05) {
+        const glowR = p.radius * (6 + runGlow * 14);
+        const gr = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, glowR);
+        gr.addColorStop(0, rgbStr(primary, runGlow * 0.35));
+        gr.addColorStop(1, 'rgba(0,0,0,0)');
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, glowR, 0, Math.PI * 2);
+        ctx.fillStyle = gr;
+        ctx.fill();
+      }
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, p.radius * (1.5 + energy * 0.8), 0, Math.PI * 2);
+      ctx.fillStyle = rgbStr(primary, alpha);
+      ctx.fill();
+    }
+  } else { // broadcast
+    for (let i = 0; i < count; i++) {
+      const p     = pool[i];
+      const alpha = (0.2 + energy * 0.45) * (0.6 + 0.4 * Math.sin(p.life * Math.PI * 2));
+      if (p.trail.length > 1) {
+        ctx.beginPath();
+        ctx.moveTo(p.trail[0].x, p.trail[0].y);
+        for (let j = 1; j < p.trail.length; j++) ctx.lineTo(p.trail[j].x, p.trail[j].y);
+        ctx.strokeStyle = rgbStr(secondary, alpha * 0.25);
+        ctx.lineWidth   = p.radius * 0.5;
+        ctx.stroke();
+      }
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, p.radius * (0.9 + energy * 0.3), 0, Math.PI * 2);
+      ctx.fillStyle = rgbStr(primary, alpha * 0.85);
+      ctx.fill();
+    }
+  }
+}
+
 // ─── Minimalist renderer ──────────────────────────────────────────────────────
 function drawMinimal(dt) {
   const raw = simulateAndGetParams(dt);
@@ -977,46 +1087,7 @@ function drawMinimal(dt) {
     ctx.fillRect(0, 0, W, H);
   }
 
-  const maxSpecial = Math.floor(activeCount * 0.05);
-  let specialDrawn = 0;
-
-  for (let i = 0; i < activeCount; i++) {
-    const p     = pool[i];
-    // Background particles: alpha hard-capped at 0.35 so they never compete with foreground
-    const alpha = Math.min(0.35, (0.25 + energy * 0.55) * (0.6 + 0.4 * Math.sin(p.life * Math.PI * 2)));
-
-    if (p.trail.length > 1) {
-      ctx.beginPath();
-      ctx.moveTo(p.trail[0].x, p.trail[0].y);
-      for (let j = 1; j < p.trail.length; j++) ctx.lineTo(p.trail[j].x, p.trail[j].y);
-      ctx.strokeStyle = rgbStr(secondary, alpha * 0.3);
-      ctx.lineWidth   = p.radius * 0.6;
-      ctx.stroke();
-    }
-
-    // Special glow: cap at 5% of active count for visual scarcity
-    if (p.special && energy > 0.4 && specialDrawn < maxSpecial) {
-      specialDrawn++;
-      const gr = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, p.radius * 9);
-      gr.addColorStop(0, rgbStr(primary, 0.4));
-      gr.addColorStop(1, 'rgba(0,0,0,0)');
-      ctx.beginPath();
-      ctx.arc(p.x, p.y, p.radius * 9, 0, Math.PI * 2);
-      ctx.fillStyle = gr;
-      ctx.fill();
-      // Foreground dot gets full alpha — dominant signal
-      ctx.beginPath();
-      ctx.arc(p.x, p.y, p.radius * (1 + energy * 0.4), 0, Math.PI * 2);
-      ctx.fillStyle = rgbStr(primary, 0.8);
-      ctx.fill();
-      continue;
-    }
-
-    ctx.beginPath();
-    ctx.arc(p.x, p.y, p.radius * (1 + energy * 0.4), 0, Math.PI * 2);
-    ctx.fillStyle = rgbStr(primary, alpha);
-    ctx.fill();
-  }
+  drawParticles(activeCount, energy, primary, secondary, 'minimal');
 }
 
 // ─── Anime renderer ───────────────────────────────────────────────────────────
@@ -1075,50 +1146,7 @@ function drawAnime(dt) {
     ctx.fillRect(-20, -20, W + 40, H + 40);
   }
 
-  for (let i = 0; i < activeCount; i++) {
-    const p     = pool[i];
-    // More vivid, less subtly pulsing
-    const alpha = 0.45 + energy * 0.5;
-
-    // Speed-line trail: two strokes — thin full trail + thick near-tip
-    if (p.trail.length > 1) {
-      // Full trail (thin, faded)
-      ctx.beginPath();
-      ctx.moveTo(p.trail[0].x, p.trail[0].y);
-      for (let j = 1; j < p.trail.length; j++) ctx.lineTo(p.trail[j].x, p.trail[j].y);
-      ctx.strokeStyle = rgbStr(secondary, alpha * 0.18);
-      ctx.lineWidth   = p.radius * 0.5;
-      ctx.stroke();
-      // Bright tip segment (last 30% of trail)
-      const tipStart = Math.max(0, Math.floor(p.trail.length * 0.7));
-      if (tipStart < p.trail.length - 1) {
-        ctx.beginPath();
-        ctx.moveTo(p.trail[tipStart].x, p.trail[tipStart].y);
-        for (let j = tipStart + 1; j < p.trail.length; j++) ctx.lineTo(p.trail[j].x, p.trail[j].y);
-        ctx.strokeStyle = rgbStr(secondary, alpha * 0.65);
-        ctx.lineWidth   = p.radius * 1.6;
-        ctx.stroke();
-      }
-    }
-
-    // Power-up bloom halo on all particles during a run
-    if (runGlow > 0.05) {
-      const glowR = p.radius * (6 + runGlow * 14);
-      const gr = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, glowR);
-      gr.addColorStop(0, rgbStr(primary, runGlow * 0.35));
-      gr.addColorStop(1, 'rgba(0,0,0,0)');
-      ctx.beginPath();
-      ctx.arc(p.x, p.y, glowR, 0, Math.PI * 2);
-      ctx.fillStyle = gr;
-      ctx.fill();
-    }
-
-    // Particle dot — larger and sharper than minimal
-    ctx.beginPath();
-    ctx.arc(p.x, p.y, p.radius * (1.5 + energy * 0.8), 0, Math.PI * 2);
-    ctx.fillStyle = rgbStr(primary, alpha);
-    ctx.fill();
-  }
+  drawParticles(activeCount, energy, primary, secondary, 'anime');
 
   // Radial speed lines on big events (impact frame)
   if (flashAlpha > 0.05) {
@@ -1126,19 +1154,18 @@ function drawAnime(dt) {
     ctx.fillStyle = `rgba(255,255,255,${flashAlpha * 0.18})`;
     ctx.fillRect(-20, -20, W + 40, H + 40);
 
-    // Radial lines from center
-    const lineCount = 24;
-    const maxLen    = Math.min(W, H) * 0.55 * flashAlpha;
+    // Radial lines from center — lengths baked at trigger time, stable across frames
+    const maxLen = Math.min(W, H) * 0.55 * flashAlpha;
     ctx.save();
     ctx.translate(W / 2, H / 2);
-    for (let i = 0; i < lineCount; i++) {
-      const angle = (i / lineCount) * Math.PI * 2;
-      const len   = maxLen * (0.5 + Math.random() * 0.5);
+    ctx.strokeStyle = rgbStr(primary, flashAlpha * 0.6);
+    ctx.lineWidth   = 1.5 + flashAlpha * 3;
+    for (let i = 0; i < SPEED_LINE_COUNT; i++) {
+      const angle = _speedLineAngles[i];
+      const len   = maxLen * _speedLineLengths[i];
       ctx.beginPath();
       ctx.moveTo(Math.cos(angle) * 30, Math.sin(angle) * 30);
       ctx.lineTo(Math.cos(angle) * len, Math.sin(angle) * len);
-      ctx.strokeStyle = rgbStr(primary, flashAlpha * 0.6);
-      ctx.lineWidth   = 1.5 + flashAlpha * 3;
       ctx.stroke();
     }
     ctx.restore();
@@ -1689,7 +1716,7 @@ function tick(ts) {
 
   try {
     if (playing) {
-      playheadSec += (dt / 1000) * speed * 20;
+      playheadSec += (dt / 1000) * speed * GAME_SPEED_SCALE;
       if (playheadSec >= gameDuration()) {
         playheadSec = gameDuration();
         showEndCard();
@@ -2152,22 +2179,7 @@ function drawBroadcast(dt) {
   }
 
   // Particles — 50% count, subdued; data layer is the dominant visual
-  for (let i = 0; i < bcCount; i++) {
-    const p     = pool[i];
-    const alpha = (0.2 + energy * 0.45) * (0.6 + 0.4 * Math.sin(p.life * Math.PI * 2));
-    if (p.trail.length > 1) {
-      ctx.beginPath();
-      ctx.moveTo(p.trail[0].x, p.trail[0].y);
-      for (let j = 1; j < p.trail.length; j++) ctx.lineTo(p.trail[j].x, p.trail[j].y);
-      ctx.strokeStyle = rgbStr(secondary, alpha * 0.25);
-      ctx.lineWidth   = p.radius * 0.5;
-      ctx.stroke();
-    }
-    ctx.beginPath();
-    ctx.arc(p.x, p.y, p.radius * (0.9 + energy * 0.3), 0, Math.PI * 2);
-    ctx.fillStyle = rgbStr(primary, alpha * 0.85);
-    ctx.fill();
-  }
+  drawParticles(bcCount, energy, primary, secondary, 'broadcast');
 
   updateBroadcastHUD(dt);
 }
